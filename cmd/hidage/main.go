@@ -17,8 +17,8 @@ func main() {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.PersistentFlags().StringVar(&repoFlag, "repo", "",
-		"repository directory (default: ~/.config/hidage/repo)")
+	root.PersistentFlags().StringVarP(&chdirFlag, "chdir", "C", "",
+		"operate as if started in this directory (repository discovery walks up from here)")
 	root.AddCommand(
 		newInitCmd(),
 		newSnapshotCmd(),

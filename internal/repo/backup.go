@@ -13,44 +13,52 @@ import (
 
 // SnapshotStats summarizes what a snapshot stored.
 type SnapshotStats struct {
-	TotalObjects int // objects in the store after the snapshot
+	TotalObjects int // objects across both stores after the snapshot
 	NewObjects   int // objects this snapshot actually wrote (the delta)
+	Pruned       int // objects reclaimed when --replace dropped the previous snapshot
 }
 
-// Snapshot chunks src into the Merkle DAG, stores the objects not already
-// present, and writes a signed snapshot root chained to the latest one. priv is
-// the owner's signing key.
-func (r *Repo) Snapshot(src string, priv ed25519.PrivateKey) (*Snapshot, *SnapshotStats, error) {
-	info, err := os.Stat(src)
+// Snapshot captures the repository's tracked folder. With replace set, it
+// supersedes the previous latest snapshot (chaining past it) and prunes objects
+// only that snapshot held. priv is the owner's signing key.
+func (r *Repo) Snapshot(priv ed25519.PrivateKey, replace bool) (*Snapshot, *SnapshotStats, error) {
+	info, err := os.Stat(r.Folder)
 	if err != nil {
-		return nil, nil, fmt.Errorf("stat %s: %w", src, err)
+		return nil, nil, fmt.Errorf("stat %s: %w", r.Folder, err)
 	}
 
-	before, err := r.storeIDs()
+	prev, err := r.latest()
 	if err != nil {
 		return nil, nil, err
 	}
 
-	b := dag.NewBuilder(r.store, r.masterKey)
-	root, err := r.buildRoot(b, src, info)
+	before, err := r.objectIDs()
 	if err != nil {
 		return nil, nil, err
 	}
 
-	parent, err := r.latest()
+	b := dag.NewBuilder(r.meta, r.data, r.masterKey)
+	root, err := r.buildRoot(b, r.Folder, info)
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// Normally chain to the previous snapshot; when replacing, chain past it so
+	// the history stays valid after it is forgotten.
 	parentID := ""
-	if parent != nil {
-		parentID = parent.ID
+	if prev != nil {
+		if replace {
+			parentID = prev.Parent
+		} else {
+			parentID = prev.ID
+		}
 	}
 
 	snap := &Snapshot{
 		Version:   1,
 		CreatedAt: time.Now().UTC(),
 		Parent:    parentID,
-		Source:    filepath.Base(src),
+		Source:    filepath.Base(r.Folder),
 		Root:      root,
 	}
 	if err := snap.Sign(priv); err != nil {
@@ -60,37 +68,39 @@ func (r *Repo) Snapshot(src string, priv ed25519.PrivateKey) (*Snapshot, *Snapsh
 		return nil, nil, err
 	}
 
-	after, err := r.storeIDs()
+	after, err := r.objectIDs()
 	if err != nil {
 		return nil, nil, err
 	}
 	stats := &SnapshotStats{TotalObjects: len(after), NewObjects: len(after) - len(before)}
+
+	if replace && prev != nil {
+		if err := r.Forget(prev.ID); err != nil {
+			return nil, nil, err
+		}
+		ps, err := r.Prune()
+		if err != nil {
+			return nil, nil, err
+		}
+		stats.Pruned = ps.Deleted
+		stats.TotalObjects -= ps.Deleted
+	}
 	return snap, stats, nil
 }
 
-// buildRoot wraps the source under a single top-level entry named after it, so
-// both files and directories restore under their original name.
+// buildRoot wraps the tracked folder under a single top-level entry named after
+// it, so it restores under its original name.
 func (r *Repo) buildRoot(b *dag.Builder, src string, info os.FileInfo) (dag.Ref, error) {
-	name := filepath.Base(src)
-	var entry dag.Entry
-	if info.IsDir() {
-		ref, err := r.buildTree(b, src)
-		if err != nil {
-			return dag.Ref{}, err
-		}
-		entry = dag.Entry{Name: name, Kind: dag.KindTree, Mode: uint32(info.Mode().Perm()), Ref: ref}
-	} else {
-		ref, err := r.buildFile(b, src, info)
-		if err != nil {
-			return dag.Ref{}, err
-		}
-		entry = dag.Entry{Name: name, Kind: dag.KindFile, Mode: uint32(info.Mode().Perm()), Ref: ref}
+	ref, err := r.buildTree(b, src)
+	if err != nil {
+		return dag.Ref{}, err
 	}
+	entry := dag.Entry{Name: filepath.Base(src), Kind: dag.KindTree, Mode: uint32(info.Mode().Perm()), Ref: ref}
 	return b.PutTree(dag.TreeNode{Entries: []dag.Entry{entry}})
 }
 
-// buildTree recurses a directory. os.ReadDir returns entries sorted by name, so
-// builds are deterministic.
+// buildTree recurses a directory, skipping the .hidage metadata directory.
+// os.ReadDir returns entries sorted by name, so builds are deterministic.
 func (r *Repo) buildTree(b *dag.Builder, dir string) (dag.Ref, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -98,8 +108,11 @@ func (r *Repo) buildTree(b *dag.Builder, dir string) (dag.Ref, error) {
 	}
 	var tn dag.TreeNode
 	for _, de := range entries {
+		if de.Name() == hidageDir {
+			continue // never back up our own metadata
+		}
 		full := filepath.Join(dir, de.Name())
-		info, err := de.Info()
+		fi, err := de.Info()
 		if err != nil {
 			return dag.Ref{}, err
 		}
@@ -109,13 +122,13 @@ func (r *Repo) buildTree(b *dag.Builder, dir string) (dag.Ref, error) {
 			if err != nil {
 				return dag.Ref{}, err
 			}
-			tn.Entries = append(tn.Entries, dag.Entry{Name: de.Name(), Kind: dag.KindTree, Mode: uint32(info.Mode().Perm()), Ref: ref})
-		case info.Mode().IsRegular():
-			ref, err := r.buildFile(b, full, info)
+			tn.Entries = append(tn.Entries, dag.Entry{Name: de.Name(), Kind: dag.KindTree, Mode: uint32(fi.Mode().Perm()), Ref: ref})
+		case fi.Mode().IsRegular():
+			ref, err := r.buildFile(b, full, fi)
 			if err != nil {
 				return dag.Ref{}, err
 			}
-			tn.Entries = append(tn.Entries, dag.Entry{Name: de.Name(), Kind: dag.KindFile, Mode: uint32(info.Mode().Perm()), Ref: ref})
+			tn.Entries = append(tn.Entries, dag.Entry{Name: de.Name(), Kind: dag.KindFile, Mode: uint32(fi.Mode().Perm()), Ref: ref})
 		default:
 			// Skip symlinks, devices, etc. in this phase.
 		}
@@ -149,15 +162,17 @@ func (r *Repo) buildFile(b *dag.Builder, path string, info os.FileInfo) (dag.Ref
 	return b.PutFile(dag.FileNode{Mode: uint32(info.Mode().Perm()), Size: size, Chunks: chunks})
 }
 
-// storeIDs returns the set of object IDs currently in the store.
-func (r *Repo) storeIDs() (map[string]struct{}, error) {
-	ids, err := r.store.List()
-	if err != nil {
-		return nil, err
-	}
-	set := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
-		set[id] = struct{}{}
+// objectIDs returns the union of object IDs across the meta and data stores.
+func (r *Repo) objectIDs() (map[string]struct{}, error) {
+	set := make(map[string]struct{})
+	for _, st := range []interface{ List() ([]string, error) }{r.meta, r.data} {
+		ids, err := st.List()
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			set[id] = struct{}{}
+		}
 	}
 	return set, nil
 }

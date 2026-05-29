@@ -56,48 +56,53 @@ type TreeNode struct {
 	Entries []Entry `json:"entries"`
 }
 
-// Builder writes objects into a store under a master key.
+// Builder writes objects under a master key, routing by kind: bulk file data
+// (chunks) goes to the data store, while the small structure nodes (file/tree)
+// go to the meta store. This is what lets the metadata live in a per-folder
+// .hidage/ while the chunk bulk lives in a node-wide store outside $HOME.
 type Builder struct {
-	store     store.Store
+	meta      store.Store
+	data      store.Store
 	masterKey []byte
 }
 
-// NewBuilder returns a Builder backed by st and keyed by masterKey.
-func NewBuilder(st store.Store, masterKey []byte) *Builder {
-	return &Builder{store: st, masterKey: masterKey}
+// NewBuilder returns a Builder writing structure nodes to meta and chunks to
+// data, keyed by masterKey.
+func NewBuilder(meta, data store.Store, masterKey []byte) *Builder {
+	return &Builder{meta: meta, data: data, masterKey: masterKey}
 }
 
-// put seals plaintext and stores it, returning a Ref. Deterministic encryption
-// plus the store's content addressing means re-putting identical bytes is a
+// put seals plaintext and stores it in st, returning a Ref. Deterministic
+// encryption plus content addressing means re-putting identical bytes is a
 // no-op, which is the whole basis of cross-snapshot dedup.
-func (b *Builder) put(plaintext []byte, size int64) (Ref, error) {
+func (b *Builder) put(st store.Store, plaintext []byte, size int64) (Ref, error) {
 	ct, fp, err := crypto.SealDeterministic(b.masterKey, plaintext)
 	if err != nil {
 		return Ref{}, err
 	}
-	id, err := b.store.Put(ct)
+	id, err := st.Put(ct)
 	if err != nil {
 		return Ref{}, err
 	}
 	return Ref{Fp: fp, CipherID: id, Size: size}, nil
 }
 
-// PutChunk stores a raw file-data chunk.
+// PutChunk stores a raw file-data chunk in the data store.
 func (b *Builder) PutChunk(data []byte) (Ref, error) {
-	return b.put(data, int64(len(data)))
+	return b.put(b.data, data, int64(len(data)))
 }
 
-// PutFile stores a file node.
+// PutFile stores a file node in the meta store.
 func (b *Builder) PutFile(n FileNode) (Ref, error) {
 	n.Type = KindFile
 	data, err := json.Marshal(n)
 	if err != nil {
 		return Ref{}, err
 	}
-	return b.put(data, n.Size)
+	return b.put(b.meta, data, n.Size)
 }
 
-// PutTree stores a tree node, sorting entries by name for determinism.
+// PutTree stores a tree node (entries name-sorted for determinism) in meta.
 func (b *Builder) PutTree(n TreeNode) (Ref, error) {
 	n.Type = KindTree
 	sort.Slice(n.Entries, func(i, j int) bool { return n.Entries[i].Name < n.Entries[j].Name })
@@ -105,34 +110,36 @@ func (b *Builder) PutTree(n TreeNode) (Ref, error) {
 	if err != nil {
 		return Ref{}, err
 	}
-	return b.put(data, 0)
+	return b.put(b.meta, data, 0)
 }
 
-// Loader reads objects back out of a store under a master key.
+// Loader reads objects back out of the meta and data stores under a master key.
 type Loader struct {
-	store     store.Store
+	meta      store.Store
+	data      store.Store
 	masterKey []byte
 }
 
-// NewLoader returns a Loader for st keyed by masterKey.
-func NewLoader(st store.Store, masterKey []byte) *Loader {
-	return &Loader{store: st, masterKey: masterKey}
+// NewLoader returns a Loader reading structure nodes from meta and chunks from
+// data, keyed by masterKey.
+func NewLoader(meta, data store.Store, masterKey []byte) *Loader {
+	return &Loader{meta: meta, data: data, masterKey: masterKey}
 }
 
-func (l *Loader) open(ref Ref) ([]byte, error) {
-	ct, err := l.store.Get(ref.CipherID)
+func (l *Loader) open(st store.Store, ref Ref) ([]byte, error) {
+	ct, err := st.Get(ref.CipherID)
 	if err != nil {
 		return nil, err
 	}
 	return crypto.OpenDeterministic(l.masterKey, ref.Fp, ct)
 }
 
-// Chunk returns raw chunk data.
-func (l *Loader) Chunk(ref Ref) ([]byte, error) { return l.open(ref) }
+// Chunk returns raw chunk data from the data store.
+func (l *Loader) Chunk(ref Ref) ([]byte, error) { return l.open(l.data, ref) }
 
-// File loads a file node.
+// File loads a file node from the meta store.
 func (l *Loader) File(ref Ref) (FileNode, error) {
-	data, err := l.open(ref)
+	data, err := l.open(l.meta, ref)
 	if err != nil {
 		return FileNode{}, err
 	}
@@ -146,9 +153,9 @@ func (l *Loader) File(ref Ref) (FileNode, error) {
 	return n, nil
 }
 
-// Tree loads a tree node.
+// Tree loads a tree node from the meta store.
 func (l *Loader) Tree(ref Ref) (TreeNode, error) {
-	data, err := l.open(ref)
+	data, err := l.open(l.meta, ref)
 	if err != nil {
 		return TreeNode{}, err
 	}

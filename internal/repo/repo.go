@@ -1,9 +1,10 @@
-// Package repo implements hidage's versioned storage: a repository holds a
-// content-addressed store of deterministically-encrypted objects plus a set of
-// signed snapshots. Taking a snapshot chunks the source tree into a Merkle DAG
-// and stores only the objects not already present, so updates re-store just the
-// delta. Old snapshots remain fully restorable; prune garbage-collects objects
-// no snapshot references.
+// Package repo implements hidage's versioned storage. A repository is a tracked
+// folder containing a .hidage/ directory (like .git): it holds the repo marker,
+// the small Merkle-DAG structure nodes, and the signed snapshots. The bulk chunk
+// data lives in a separate node-wide store outside the folder, and the
+// encryption master key is user-level (see internal/userkey), so the same chunk
+// deduplicates across every folder you back up. Taking a snapshot stores only
+// the objects not already present; old snapshots stay restorable until pruned.
 package repo
 
 import (
@@ -12,120 +13,132 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
-	"hidage/internal/crypto"
 	"hidage/internal/store"
 )
 
-const configName = "hidage-repo.json"
+// hidageDir is the per-folder metadata directory name.
+const hidageDir = ".hidage"
 
-// Config is the on-disk repository descriptor. The master key is wrapped under a
-// passphrase-derived KEK; only the wrapped form is ever written.
+// Config marks a folder as a hidage repository. It holds no key material — the
+// encryption key is user-level.
 type Config struct {
-	Version          int                 `json:"version"`
-	RepoID           string              `json:"repoID"`
-	Argon2           crypto.Argon2Params `json:"argon2"`
-	WrappedMasterKey []byte              `json:"wrappedMasterKey"`
+	Version int    `json:"version"`
+	RepoID  string `json:"repoID"`
 }
 
-// Repo is an opened repository.
+// Repo is an opened repository rooted at a tracked folder.
 type Repo struct {
-	Path      string
-	cfg       Config
-	store     *store.FSStore
+	Folder    string // the tracked folder (contains .hidage/)
+	meta      store.Store
+	data      store.Store
 	masterKey []byte
 }
 
-func configPath(path string) string   { return filepath.Join(path, configName) }
-func storeDir(path string) string     { return filepath.Join(path, "store") }
-func snapshotsDir(path string) string { return filepath.Join(path, "snapshots") }
+func metaDir(folder string) string    { return filepath.Join(folder, hidageDir, "objects") }
+func snapsDir(folder string) string   { return filepath.Join(folder, hidageDir, "snapshots") }
+func configPath(folder string) string { return filepath.Join(folder, hidageDir, "config.json") }
 
-// Exists reports whether a repository is present at path.
-func Exists(path string) bool {
-	_, err := os.Stat(configPath(path))
+// Exists reports whether folder is a hidage repository.
+func Exists(folder string) bool {
+	_, err := os.Stat(configPath(folder))
 	return err == nil
 }
 
-// Init creates a new repository at path, generating a fresh master key wrapped
-// under the passphrase. It fails if a repository already exists there.
-func Init(path, passphrase string) (*Repo, error) {
-	if Exists(path) {
-		return nil, fmt.Errorf("repository already exists at %s", path)
+// Find walks up from start looking for a repository, returning the tracked
+// folder, or "" if none is found.
+func Find(start string) string {
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return ""
 	}
-	for _, d := range []string{path, storeDir(path), snapshotsDir(path)} {
+	for {
+		if Exists(dir) {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// openDataStore opens the node-wide chunk store for a repository (namespaced by
+// repoID, deduplicated across repos via hard links), turning a permission
+// failure into actionable guidance.
+func openDataStore(dataDir, repoID string) (store.Store, error) {
+	st, err := store.NewHardlinkStore(dataDir, repoID)
+	if err == nil {
+		return st, nil
+	}
+	if errors.Is(err, fs.ErrPermission) {
+		return nil, fmt.Errorf("cannot use data store at %s: permission denied.\n"+
+			"Create it once, e.g.:\n"+
+			"  sudo mkdir -p %s && sudo chown \"$USER\" %s\n"+
+			"or set HIDAGE_STORE to a writable path.", dataDir, dataDir, dataDir)
+	}
+	return nil, err
+}
+
+// Init creates a repository in folder, with chunk data going to dataDir and
+// objects encrypted under masterKey. It fails if folder is already a repo.
+func Init(folder string, masterKey []byte, dataDir string) (*Repo, error) {
+	if Exists(folder) {
+		return nil, fmt.Errorf("%s is already a hidage repository", folder)
+	}
+	for _, d := range []string{metaDir(folder), snapsDir(folder)} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, fmt.Errorf("create %s: %w", d, err)
 		}
-	}
-
-	argon, err := crypto.DefaultArgon2Params()
-	if err != nil {
-		return nil, err
-	}
-	masterKey, err := crypto.NewDEK()
-	if err != nil {
-		return nil, err
-	}
-	kek := crypto.DeriveKEK(passphrase, argon)
-	wrapped, err := crypto.WrapDEK(kek, masterKey)
-	if err != nil {
-		return nil, err
 	}
 	idBytes := make([]byte, 16)
 	if _, err := rand.Read(idBytes); err != nil {
 		return nil, err
 	}
-
-	cfg := Config{
-		Version:          1,
-		RepoID:           hex.EncodeToString(idBytes),
-		Argon2:           argon,
-		WrappedMasterKey: wrapped,
-	}
-	if err := writeConfig(path, cfg); err != nil {
-		return nil, err
-	}
-	st, err := store.NewFSStore(storeDir(path))
+	cfg := Config{Version: 1, RepoID: hex.EncodeToString(idBytes)}
+	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return nil, err
 	}
-	return &Repo{Path: path, cfg: cfg, store: st, masterKey: masterKey}, nil
+	if err := os.WriteFile(configPath(folder), data, 0o600); err != nil {
+		return nil, fmt.Errorf("write repo config: %w", err)
+	}
+
+	meta, err := store.NewFSStore(metaDir(folder))
+	if err != nil {
+		return nil, err
+	}
+	ds, err := openDataStore(dataDir, cfg.RepoID)
+	if err != nil {
+		return nil, err
+	}
+	return &Repo{Folder: folder, meta: meta, data: ds, masterKey: masterKey}, nil
 }
 
-// Open unlocks an existing repository with the passphrase.
-func Open(path, passphrase string) (*Repo, error) {
-	if !Exists(path) {
-		return nil, fmt.Errorf("no repository at %s (run `hidage repo init`)", path)
+// Open opens an existing repository in folder.
+func Open(folder string, masterKey []byte, dataDir string) (*Repo, error) {
+	if !Exists(folder) {
+		return nil, fmt.Errorf("%s is not a hidage repository", folder)
 	}
-	data, err := os.ReadFile(configPath(path))
+	raw, err := os.ReadFile(configPath(folder))
 	if err != nil {
 		return nil, fmt.Errorf("read repo config: %w", err)
 	}
 	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
-	kek := crypto.DeriveKEK(passphrase, cfg.Argon2)
-	masterKey, err := crypto.UnwrapDEK(kek, cfg.WrappedMasterKey)
-	if err != nil {
-		return nil, errors.New("cannot unlock repository (wrong passphrase?)")
-	}
-	st, err := store.NewFSStore(storeDir(path))
+	meta, err := store.NewFSStore(metaDir(folder))
 	if err != nil {
 		return nil, err
 	}
-	return &Repo{Path: path, cfg: cfg, store: st, masterKey: masterKey}, nil
-}
-
-// Store exposes the underlying object store (used by info/verify-style callers).
-func (r *Repo) Store() *store.FSStore { return r.store }
-
-func writeConfig(path string, cfg Config) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	ds, err := openDataStore(dataDir, cfg.RepoID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return os.WriteFile(configPath(path), data, 0o600)
+	return &Repo{Folder: folder, meta: meta, data: ds, masterKey: masterKey}, nil
 }

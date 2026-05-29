@@ -19,7 +19,7 @@ func (r *Repo) Restore(snap *Snapshot, outDir string) error {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("create out dir: %w", err)
 	}
-	l := dag.NewLoader(r.store, r.masterKey)
+	l := dag.NewLoader(r.meta, r.data, r.masterKey)
 	root, err := l.Tree(snap.Root)
 	if err != nil {
 		return err

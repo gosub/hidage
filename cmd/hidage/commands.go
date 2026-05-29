@@ -5,60 +5,66 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"hidage/internal/config"
 	"hidage/internal/dag"
 	"hidage/internal/repo"
 )
 
 func newSnapshotCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "snapshot <path>",
-		Short: "Snapshot a file or folder (creates the repository on first use)",
-		Args:  cobra.ExactArgs(1),
+	var replace bool
+	cmd := &cobra.Command{
+		Use:   "snapshot [dir]",
+		Short: "Snapshot a folder (creates its .hidage repository on first use)",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			target := startDir()
+			if len(args) == 1 {
+				target = args[0]
+			}
+
 			id, err := loadIdentity()
 			if err != nil {
 				return err
 			}
-			dir, err := repoDir()
+			mk, err := unlockMasterKey()
 			if err != nil {
 				return err
 			}
+			dataDir := config.DataStoreDir()
 
-			// Auto-init on first use: confirm the passphrase when creating.
+			// Use an existing repository found at/above target, else create one
+			// rooted at target.
 			var r *repo.Repo
-			if repo.Exists(dir) {
-				pass, err := readPassphrase(false)
-				if err != nil {
-					return err
-				}
-				if r, err = repo.Open(dir, pass); err != nil {
+			if folder := repo.Find(target); folder != "" {
+				if r, err = repo.Open(folder, mk, dataDir); err != nil {
 					return err
 				}
 			} else {
-				pass, err := readPassphrase(true)
-				if err != nil {
+				if r, err = repo.Init(target, mk, dataDir); err != nil {
 					return err
 				}
-				if r, err = repo.Init(dir, pass); err != nil {
-					return err
-				}
-				fmt.Printf("Created repository at %s\n", dir)
+				fmt.Printf("Created repository in %s/.hidage\n", target)
 			}
 
-			snap, stats, err := r.Snapshot(args[0], id.Private)
+			snap, stats, err := r.Snapshot(id.Private, replace)
 			if err != nil {
 				return err
 			}
 			fmt.Printf("Snapshot %s\n", snap.ID[:16])
-			fmt.Printf("  source:        %s\n", snap.Source)
+			fmt.Printf("  folder:        %s\n", r.Folder)
 			if snap.Parent != "" {
 				fmt.Printf("  parent:        %s\n", snap.Parent[:16])
 			}
 			fmt.Printf("  new objects:   %d (stored only the delta)\n", stats.NewObjects)
+			if replace && stats.Pruned > 0 {
+				fmt.Printf("  replaced previous snapshot; pruned %d objects\n", stats.Pruned)
+			}
 			fmt.Printf("  total objects: %d\n", stats.TotalObjects)
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&replace, "replace", false, "supersede the previous snapshot and prune it")
+	return cmd
 }
 
 func newSnapshotsCmd() *cobra.Command {
@@ -67,7 +73,7 @@ func newSnapshotsCmd() *cobra.Command {
 		Short: "List snapshot history (oldest first)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r, err := openRepo()
+			r, err := discoverRepo()
 			if err != nil {
 				return err
 			}
@@ -94,7 +100,7 @@ func newRestoreCmd() *cobra.Command {
 		Short: "Restore a snapshot into a directory",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r, err := openRepo()
+			r, err := discoverRepo()
 			if err != nil {
 				return err
 			}
@@ -117,7 +123,7 @@ func newDiffCmd() *cobra.Command {
 		Short: "Show paths that changed between two snapshots",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r, err := openRepo()
+			r, err := discoverRepo()
 			if err != nil {
 				return err
 			}
@@ -152,7 +158,7 @@ func newForgetCmd() *cobra.Command {
 		Short: "Remove a snapshot record (run prune to reclaim space)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r, err := openRepo()
+			r, err := discoverRepo()
 			if err != nil {
 				return err
 			}
@@ -171,7 +177,7 @@ func newPruneCmd() *cobra.Command {
 		Short: "Garbage-collect objects no snapshot references",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r, err := openRepo()
+			r, err := discoverRepo()
 			if err != nil {
 				return err
 			}

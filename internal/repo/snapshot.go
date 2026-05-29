@@ -74,7 +74,7 @@ func (s *Snapshot) Verify() error {
 }
 
 func (r *Repo) snapshotPath(id string) string {
-	return filepath.Join(snapshotsDir(r.Path), id+".json")
+	return filepath.Join(snapsDir(r.Folder), id+".json")
 }
 
 func (r *Repo) saveSnapshot(s *Snapshot) error {
@@ -87,7 +87,7 @@ func (r *Repo) saveSnapshot(s *Snapshot) error {
 
 // ListSnapshots returns all snapshots, verified, oldest first.
 func (r *Repo) ListSnapshots() ([]*Snapshot, error) {
-	entries, err := os.ReadDir(snapshotsDir(r.Path))
+	entries, err := os.ReadDir(snapsDir(r.Folder))
 	if err != nil {
 		return nil, fmt.Errorf("read snapshots dir: %w", err)
 	}
@@ -96,7 +96,7 @@ func (r *Repo) ListSnapshots() ([]*Snapshot, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(snapshotsDir(r.Path), e.Name()))
+		data, err := os.ReadFile(filepath.Join(snapsDir(r.Folder), e.Name()))
 		if err != nil {
 			return nil, err
 		}
