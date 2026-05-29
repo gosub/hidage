@@ -17,37 +17,60 @@ A node has an Ed25519 keypair. The public key is its pseudonymous identity (and 
 future libp2p peer key); the private key signs snapshots. The seed is stored
 base64-encoded at `~/.config/hidage/identity.key` (mode 0600).
 
-### Key hierarchy (`internal/crypto`)
+### Key hierarchy (`internal/crypto`, `internal/userkey`)
 - **KEK** — derived from the user's passphrase with **Argon2id** (defaults: time=3,
   memory=64 MiB, threads=4, 32-byte output, 16-byte random salt).
-- **Master key** — each repository has a random 256-bit master key, wrapped under the KEK
-  with ChaCha20-Poly1305 (`nonce || ciphertext`). Only the wrapped form is written to
-  disk. A wrong passphrase fails the AEAD tag, which is how unlock errors surface.
+- **Master key** — a single random 256-bit key **per user** (not per repository),
+  generated at `hidage init`, wrapped under the KEK with ChaCha20-Poly1305
+  (`nonce || ciphertext`), and stored at `~/.config/hidage/masterkey.json`. Only the
+  wrapped form is written. A wrong passphrase fails the AEAD tag, which is how unlock
+  errors surface. Because every repository encrypts with this one key, identical chunks
+  produce identical ciphertext **across all your folders**, so the shared data store
+  deduplicates them globally.
 
-### Content-addressed store (`internal/store`)
-A `Store` is a blob map keyed by the hex SHA-256 of its contents. The local `FSStore`
-writes to `<root>/<id[:2]>/<id>` (mode 0600). `Put` is idempotent — storing identical
-bytes twice is a no-op, which is the physical basis of deduplication. The interface
-(`Put/Get/Has/Delete/List`) is the seam a libp2p-backed network store will implement in
-Phase 3.
+### Content-addressed stores (`internal/store`)
+A `Store` is a blob map keyed by the hex SHA-256 of its contents; `Put` is idempotent.
+hidage uses **two** implementations:
+
+- `FSStore` — writes `<root>/<id[:2]>/<id>` (mode 0600). Used for the small per-folder
+  *meta* store (DAG nodes) in `.hidage/objects/`.
+- `HardlinkStore` — the node-wide *data* store for chunks. One canonical copy of each
+  blob lives in `pool/<id>`; each repository hard-links it into its own
+  `refs/<repoID>/<id>` namespace. The filesystem's link count is therefore a
+  cross-repository reference count: a repo prunes by unlinking only its own refs, and a
+  blob's disk space is reclaimed only when the **last** repo unlinks it (the pool link is
+  the sole remaining one). This deduplicates identical chunks across every folder while
+  keeping prune safe and registry-free. It requires the pool and refs to share one Unix
+  filesystem (hard links can't span filesystems).
+
+The shared `Put/Get/Has/Delete/List` interface is also the seam a libp2p-backed network
+store will implement in Phase 3.
 
 ---
 
 ## The repository (`internal/repo`)
 
-A repository is a directory:
+Like git, each tracked folder carries its own metadata in a `.hidage/` directory; unlike
+git, the bulk chunk data is externalized so it never bloats the folder (or a backup of
+it):
 
 ```
-<repo>/
-  hidage-repo.json     # {version, repoID, argon2 params, wrappedMasterKey}
-  store/               # content-addressed encrypted objects (chunks + DAG nodes)
+<folder>/.hidage/
+  config.json          # {version, repoID} — no key material (the key is user-level)
+  objects/<id>         # meta store: encrypted DAG nodes (file/tree), small
   snapshots/<id>.json  # one signed snapshot root per version
+
+$HIDAGE_STORE (default /opt/hidage/store)
+  pool/<id>            # one canonical encrypted copy of each chunk (the bulk)
+  refs/<repoID>/<id>   # this repo's hard links into the pool — its reference set
 ```
 
-`Init` generates a random per-repo master key, wraps it under the passphrase KEK, and
-writes the config. `Open` re-derives the KEK and unwraps the master key. The CLI uses a
-default repository at `~/.config/hidage/repo` (override with `--repo`), auto-created on
-the first `snapshot`.
+`Init` writes `.hidage/` and its marker config; `Open` reads it. Both take the user
+master key (loaded once via `internal/userkey`) and the data-store path. `Find` locates a
+repository by walking up from the current directory, so commands work git-style from
+anywhere inside a tracked folder; `snapshot` auto-creates `.hidage/` on first use. The
+data store path comes from `$HIDAGE_STORE` or the `/opt/hidage/store` default; a
+permission failure there yields actionable setup guidance.
 
 ### Content-defined chunking (`internal/chunk`)
 Files are split with **FastCDC** (`github.com/jotfs/fastcdc-go`, average 1 MiB, min 256
@@ -74,6 +97,11 @@ chunk          raw file bytes (a leaf)
 FileNode  { type:"file", mode, size, chunks: [Ref, …] }          ordered chunk refs
 TreeNode  { type:"tree", entries: [{name, kind, mode, ref}, …] } name-sorted dir
 ```
+
+The `dag.Builder`/`Loader` route by kind: chunks (the bulk) go to the node-wide **data**
+store, while file and tree nodes (the small structure) go to the per-folder **meta** store
+in `.hidage/objects/`. This is what lets the recipe travel with the folder while the heavy
+data stays external.
 
 A directory's `TreeNode` references child trees and files by `Ref`; a snapshot references
 a single root `TreeNode`. Because a `Ref` is determined by content, an unchanged file or
@@ -106,8 +134,9 @@ swapped `fp`/ciphertext pairing).
 
 **Why HMAC under the master key rather than a bare `SHA-256(plaintext)`?** A bare
 plaintext hash would let anyone who *guesses* a chunk confirm its presence (a convergent-
-encryption confirmation attack). Keying the fingerprint with the per-repo secret means
-dedup works **within the owner's own data** but leaks no chunk-equality across users.
+encryption confirmation attack). Keying the fingerprint with the user's secret means dedup
+works **across all the owner's folders** (one user key) but leaks no chunk-equality to
+other users.
 
 ### Snapshots & history
 A snapshot is a signed root:
@@ -124,9 +153,15 @@ Snapshot { version, id, createdAt, parent, source, root: Ref, ownerPubKey, signa
   snapshot sharing all unchanged refs; **remove a file** = a new snapshot whose tree omits
   it. Old snapshots stay valid and restorable.
 
-`buildRoot` wraps the source under a single top-level entry named after it, so both files
-and directories restore under their original name. `Snapshot` also reports how many new
-objects it wrote (the delta) versus the repository total.
+A repository tracks **its own folder**: `Snapshot` walks `<folder>`, skipping the
+`.hidage/` metadata directory, and `buildRoot` wraps it under a single top-level entry
+named after the folder so it restores under its original name. `Snapshot` reports the new
+objects it wrote (the delta) versus the total.
+
+`snapshot --replace` supersedes the previous latest snapshot: the new snapshot chains to
+the *replaced* snapshot's parent (so history stays valid), then the previous one is
+forgotten and a prune reclaims the objects only it held. This serves the "keep just the
+current state" workflow without losing the rest of the chain.
 
 Restore streams each file chunk-by-chunk to disk (memory stays bounded regardless of file
 size) and rejects path-traversal entry names.
@@ -137,10 +172,17 @@ so cost is proportional to the change, not the tree size. It reports each path a
 added / removed / modified.
 
 ### Prune / GC (`Repo.Forget`, `Repo.Prune`)
-`forget` deletes a snapshot's root record. `prune` then mark-sweeps: it computes the set
-of `CipherID`s reachable from *every surviving snapshot* (root → trees → files → chunks)
-and deletes any stored object not in that set. Objects shared with a surviving snapshot
-are retained, so pruning one version never harms another.
+`forget` deletes a snapshot's root record. `prune` then mark-sweeps **both stores**: it
+computes the set of `CipherID`s reachable from *every surviving snapshot in this repository*
+(root → trees → files → chunks) and deletes any object — meta node or data ref — not in
+that set. Objects shared with a surviving snapshot are retained, so pruning one version
+never harms another.
+
+Crucially, prune is also safe across *different folders* sharing the data store: deleting a
+data object only unlinks **this** repository's `refs/<repoID>/` link. The `HardlinkStore`
+reclaims the pooled blob only when that was the last reference (link count drops to the
+pool's own), so another folder's repository that still links the same chunk keeps it. No
+cross-repository coordination or registry is needed — the filesystem refcount does it.
 
 ---
 

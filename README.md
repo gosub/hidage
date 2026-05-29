@@ -15,8 +15,9 @@ reputation ledger tracks which hosts are reliable.
 
 ## How it works
 
-A **repository** holds your data as encrypted, content-addressed objects plus a chain of
-signed **snapshots**. Taking a snapshot stores only what changed since the last one:
+You back up a folder by **snapshotting** it. Like git, each tracked folder gets a
+`.hidage/` directory holding its metadata; unlike git, the bulk file data goes to a
+separate node-wide store, and the encryption key is shared across all your folders.
 
 ```
 files ─FastCDC chunk─▶ chunks ─encrypt─▶ Merkle DAG (file + tree nodes) ─▶ signed snapshot
@@ -25,18 +26,26 @@ files ─FastCDC chunk─▶ chunks ─encrypt─▶ Merkle DAG (file + tree nod
 
 1. **Chunk** — files are split with content-defined chunking (FastCDC), so editing or
    inserting bytes mid-file only changes nearby chunks; the rest keep their identity.
-2. **Encrypt** — each chunk (and DAG node) is sealed with ChaCha20-Poly1305 under a
-   per-repository master key, which is itself wrapped by an Argon2id key derived from
-   your passphrase. Encryption is *deterministic* (key/nonce derived from the content
-   under the master key), so identical chunks encrypt identically and dedup — without
-   leaking chunk-equality across users.
+2. **Encrypt** — each chunk (and DAG node) is sealed with ChaCha20-Poly1305 under your
+   **user-level master key** (one per user, wrapped by an Argon2id key from your
+   passphrase). Encryption is *deterministic* (key/nonce derived from the content under
+   the master key), so identical chunks encrypt identically and **deduplicate — even
+   across different folders** — without leaking chunk-equality to other users.
 3. **Build the Merkle DAG** — chunks → file nodes → directory (tree) nodes → a root, each
    content-addressed. An unchanged file or subtree keeps the same reference and is never
    re-stored.
 4. **Snapshot** — an Ed25519-signed root chained to its parent. Re-snapshotting an
    unchanged tree stores **nothing**; changing one file stores only its new chunks plus
-   the tree nodes on the path to the root. Removing a file is just a new snapshot that
-   omits it; old snapshots stay restorable until you forget and prune them.
+   the tree nodes on the path to the root. Old snapshots stay restorable until you forget
+   and prune them (or use `snapshot --replace` to supersede the previous one in one step).
+
+**Where things live:**
+
+| What | Where | Notes |
+|---|---|---|
+| Node identity + master key | `~/.config/hidage/` | tiny; the key is wrapped under your passphrase |
+| Per-folder metadata (config, snapshots, DAG nodes) | `<folder>/.hidage/` | travels with the folder, like `.git` |
+| Bulk chunk data | `$HIDAGE_STORE` or `/opt/hidage/store` | node-wide, outside `$HOME`; one pooled copy per chunk, hard-linked per repo so identical chunks dedup across folders |
 
 > **Want the real internals?** [`DESIGN.md`](DESIGN.md) details the key hierarchy, the
 > deterministic AEAD scheme, the DAG node formats, snapshot signing/history, and the
@@ -51,21 +60,26 @@ go build -o hidage ./cmd/hidage
 ## Usage
 
 ```sh
-hidage init                       # one-time: create a node identity (signs snapshots)
+hidage init                       # one-time: create identity + user encryption key
 
-hidage snapshot ./project         # snapshot a file/folder (creates the repo on first use)
-hidage snapshots                  # list history, oldest first
+hidage snapshot ./project         # snapshot a folder (creates ./project/.hidage on first use)
+hidage snapshot --replace ./project   # … superseding the previous snapshot (no history kept)
+cd project && hidage snapshots    # run inside a tracked folder; commands discover .hidage
 hidage diff <idA> <idB>           # paths added / removed / modified between snapshots
 hidage restore <id> ./out         # materialize a version into ./out
 hidage forget <id>                # drop a snapshot record …
 hidage prune                      # … then GC objects no snapshot references
 ```
 
-- Snapshots live in a **default repository** at `~/.config/hidage/repo`. Use a different
-  one with `--repo <dir>` on any command; it is created automatically on first
-  `snapshot`.
+- A tracked folder is one containing `.hidage/`; `snapshot` creates it on first use.
+  Other commands **discover it by walking up from the current directory** (git-style),
+  or pass `-C <dir>` to start elsewhere.
+- The **bulk chunk store** defaults to `/opt/hidage/store`; override with the
+  `HIDAGE_STORE` env var (create it once and make it writable — `hidage` prints the exact
+  commands if it can't).
 - Snapshot IDs may be given as any unambiguous **prefix**.
-- The passphrase is read interactively; for scripting/tests set `HIDAGE_PASSPHRASE`.
+- The passphrase (set at `init`) is read interactively; for scripting/tests set
+  `HIDAGE_PASSPHRASE`.
 
 ## End-to-end demo
 
@@ -74,25 +88,27 @@ Incremental snapshots in action — a one-byte change re-stores almost nothing:
 ```sh
 go build -o hidage ./cmd/hidage
 export HIDAGE_PASSPHRASE='correct horse battery staple'
+export HIDAGE_STORE="$PWD/.hidage-data"        # a writable chunk store for the demo
 
 hidage init
-mkdir -p project/src
+mkdir -p project
 echo hello > project/a.txt
-head -c 3000000 /dev/urandom > project/big.bin     # a large, unchanging file
+head -c 3000000 /dev/urandom > project/big.bin  # a large, unchanging file
+hidage snapshot ./project                        # snapshot 1 (creates ./project/.hidage)
 
-hidage snapshot ./project                           # snapshot 1 (creates the repo)
-echo goodbye > project/a.txt                        # edit one small file
-hidage snapshot ./project                           # snapshot 2 stores only the delta
+echo goodbye > project/a.txt                     # edit one small file
+cd project
+hidage snapshot                                  # snapshot 2 (discovers .hidage); stores only the delta
 
 hidage snapshots
 A=$(hidage snapshots | awk 'NR==2{print $1}')
 hidage diff "$A" "$(hidage snapshots | awk 'NR==3{print $1}')"   # ~ project/a.txt
-
-hidage restore "$A" ./out                           # older version restores intact
-diff -r project/big.bin out/project/big.bin && echo "big.bin restored identically"
+hidage restore "$A" /tmp/out                      # older version restores intact
+diff /tmp/out/project/big.bin big.bin && echo "big.bin restored identically"
 ```
 
-`big.bin`'s chunks are written once and reused across both snapshots; only `a.txt`'s new
+`big.bin`'s chunks are written once and reused across both snapshots (and would also be
+reused if the same file appeared in a *different* tracked folder); only `a.txt`'s new
 chunk and the tree nodes up to the root are added the second time.
 
 ## Tests
@@ -103,35 +119,39 @@ go test ./...
 
 Coverage includes: deterministic chunk encryption (determinism + wrong-key/corruption
 rejection), content-defined chunk stability under insertion, DAG round-trip / diff /
-reachability, the content-addressed store, and the repository end to end —
-snapshot/restore, incremental-delta accounting, forget + prune, and history/diff. The
-`shard` (fountain-coding) package is tested standalone, reserved for the distribution
-phase.
+reachability, both stores (FS + hardlink cross-repo dedup and refcounted delete), the
+user-level key (init/load/wrong-pass), and the repository end to end — snapshot/restore,
+`.hidage` exclusion, incremental-delta accounting, history/diff, `--replace`, and
+forget + prune. The `shard` (fountain-coding) package is tested standalone, reserved for
+the distribution phase.
 
 ## Project layout
 
 | Path | Responsibility |
 |---|---|
 | `cmd/hidage` | CLI: `init`, `snapshot`, `snapshots`, `restore`, `diff`, `forget`, `prune` |
-| `internal/config` | XDG config + default-repo path resolution |
+| `internal/config` | config + data-store path resolution (`HIDAGE_STORE`) |
 | `internal/identity` | Ed25519 node identity (future libp2p peer key) |
+| `internal/userkey` | user-level encryption key, wrapped under the passphrase |
 | `internal/crypto` | Argon2id KEK, key wrap/unwrap, deterministic content-addressed seal |
-| `internal/store` | `Store` interface + local content-addressed FS store |
+| `internal/store` | `Store` interface; `FSStore` (meta) + `HardlinkStore` (pooled, cross-repo-dedup data) |
 | `internal/chunk` | content-defined chunking (FastCDC) |
-| `internal/dag` | Merkle DAG: chunk/file/tree nodes, diff, reachability |
-| `internal/repo` | versioned repository: snapshots, restore, diff, prune |
+| `internal/dag` | Merkle DAG: chunk/file/tree nodes (meta store) routed apart from chunk data |
+| `internal/repo` | versioned repository: `.hidage` layout, snapshots, restore, diff, prune |
 | `internal/shard` | fountain encode/decode (`google/gofountain`); reserved for Phase 3 distribution |
 
 ## Known limitations
 
-- **No networking yet** — objects live only in the local repository; nothing is
-  distributed. Fountain-coded redundancy across peers arrives with networking (Phase 3).
+- **No networking yet** — objects live only in the local stores; nothing is distributed.
+  Fountain-coded redundancy across peers arrives with networking (Phase 3).
 - **Pseudonymous, not IP-anonymous** — peers are identified by public key; IP-level
   anonymity is a later phase.
 - **Single-writer** — snapshots assume one owner per repository; concurrent writers from
   multiple devices (conflict resolution) are not handled.
-- **No at-rest forward secrecy** — a leaked repository master key decrypts every snapshot
-  in that repository.
+- **No at-rest forward secrecy** — a leaked user master key decrypts every snapshot in
+  every repository it encrypted.
+- **Data store needs one Unix filesystem** — cross-folder dedup uses hard links, so the
+  pool and per-repo references must live on a single hard-link-capable filesystem.
 
 ## Roadmap
 
