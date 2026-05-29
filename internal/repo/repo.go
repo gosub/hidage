@@ -87,6 +87,10 @@ func openDataStore(dataDir, repoID string) (store.Store, error) {
 // Init creates a repository in folder, with chunk data going to dataDir and
 // objects encrypted under masterKey. It fails if folder is already a repo.
 func Init(folder string, masterKey []byte, dataDir string) (*Repo, error) {
+	folder, err := filepath.Abs(folder)
+	if err != nil {
+		return nil, err
+	}
 	if Exists(folder) {
 		return nil, fmt.Errorf("%s is already a hidage repository", folder)
 	}
@@ -121,6 +125,10 @@ func Init(folder string, masterKey []byte, dataDir string) (*Repo, error) {
 
 // Open opens an existing repository in folder.
 func Open(folder string, masterKey []byte, dataDir string) (*Repo, error) {
+	folder, err := filepath.Abs(folder)
+	if err != nil {
+		return nil, err
+	}
 	if !Exists(folder) {
 		return nil, fmt.Errorf("%s is not a hidage repository", folder)
 	}

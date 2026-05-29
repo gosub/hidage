@@ -113,20 +113,27 @@ func (b *Builder) PutTree(n TreeNode) (Ref, error) {
 	return b.put(b.meta, data, 0)
 }
 
-// Loader reads objects back out of the meta and data stores under a master key.
+// Getter is the read side a Loader needs: fetch an object by content address.
+// Both the local stores and a network-backed store satisfy it, so the same
+// restore logic works locally or by pulling objects from peers.
+type Getter interface {
+	Get(id string) ([]byte, error)
+}
+
+// Loader reads objects back out of the meta and data sources under a master key.
 type Loader struct {
-	meta      store.Store
-	data      store.Store
+	meta      Getter
+	data      Getter
 	masterKey []byte
 }
 
 // NewLoader returns a Loader reading structure nodes from meta and chunks from
 // data, keyed by masterKey.
-func NewLoader(meta, data store.Store, masterKey []byte) *Loader {
+func NewLoader(meta, data Getter, masterKey []byte) *Loader {
 	return &Loader{meta: meta, data: data, masterKey: masterKey}
 }
 
-func (l *Loader) open(st store.Store, ref Ref) ([]byte, error) {
+func (l *Loader) open(st Getter, ref Ref) ([]byte, error) {
 	ct, err := st.Get(ref.CipherID)
 	if err != nil {
 		return nil, err

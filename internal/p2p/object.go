@@ -46,6 +46,36 @@ func (n *Node) registerObjectHandler() {
 	})
 }
 
+// GetObject resolves an object by content address: it serves from the local
+// blob store if present, otherwise discovers providers via the DHT and fetches
+// from the first that answers.
+func (n *Node) GetObject(ctx context.Context, id string) ([]byte, error) {
+	if n.blobs != nil {
+		if data, err := n.blobs.Get(id); err == nil {
+			return data, nil
+		}
+	}
+	if n.dht == nil {
+		return nil, ErrObjectNotFound
+	}
+	provs, err := n.FindProviders(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range provs {
+		if p.ID == n.host.ID() {
+			continue
+		}
+		if len(p.Addrs) > 0 {
+			n.host.Connect(ctx, p)
+		}
+		if data, err := n.FetchObject(ctx, p.ID, id); err == nil {
+			return data, nil
+		}
+	}
+	return nil, ErrObjectNotFound
+}
+
 // FetchObject requests object id from peer p.
 func (n *Node) FetchObject(ctx context.Context, p peer.ID, id string) ([]byte, error) {
 	s, err := n.host.NewStream(ctx, p, ObjectProtocol)

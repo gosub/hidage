@@ -73,6 +73,16 @@ func (s *Snapshot) Verify() error {
 	return nil
 }
 
+// ParseSnapshot decodes (but does not verify) a snapshot from its JSON bytes,
+// e.g. bytes fetched from the network. Callers should Verify() before use.
+func ParseSnapshot(data []byte) (*Snapshot, error) {
+	var s Snapshot
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, fmt.Errorf("parse snapshot: %w", err)
+	}
+	return &s, nil
+}
+
 func (r *Repo) snapshotPath(id string) string {
 	return filepath.Join(snapsDir(r.Folder), id+".json")
 }
@@ -134,6 +144,9 @@ func (r *Repo) FindSnapshot(idOrPrefix string) (*Snapshot, error) {
 		return nil, fmt.Errorf("ambiguous snapshot prefix %q (%d matches)", idOrPrefix, len(matches))
 	}
 }
+
+// Latest returns the most recent snapshot, or nil if none exist.
+func (r *Repo) Latest() (*Snapshot, error) { return r.latest() }
 
 // latest returns the most recent snapshot, or nil if none exist.
 func (r *Repo) latest() (*Snapshot, error) {
