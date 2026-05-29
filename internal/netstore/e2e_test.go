@@ -73,7 +73,7 @@ func TestEndToEndCrossNodeRecovery(t *testing.T) {
 	}
 	defer sNode.Close()
 	sNode.EnableDHT(ctx)
-	sNode.EnablePush(sink, nil)
+	sNode.EnablePush(sink, nil, nil)
 
 	// Owner node A: push the object closure to S, publish the head, then leave.
 	aNode, err := p2p.New(idA, nil, "/ip4/127.0.0.1/tcp/0")

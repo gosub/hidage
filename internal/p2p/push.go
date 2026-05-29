@@ -21,24 +21,24 @@ const PushProtocol = "/hidage/push/1.0.0"
 
 // EnablePush makes the node accept pushed objects into sink. accept is consulted
 // with the sender's raw Ed25519 public key and must return true to store; a nil
-// accept stores from everyone. Stored objects are re-announced to the DHT.
-func (n *Node) EnablePush(sink Sink, accept func(senderPub []byte) bool) {
+// accept stores from everyone. onStored, if non-nil, is called after a push with
+// the sender's key and the number of bytes stored (for space accounting). Stored
+// objects are re-announced to the DHT.
+func (n *Node) EnablePush(sink Sink, accept func(senderPub []byte) bool, onStored func(senderPub []byte, bytes int64)) {
 	n.sink = sink
 	n.acceptPush = accept
+	n.onStored = onStored
 	n.host.SetStreamHandler(PushProtocol, n.handlePush)
 }
 
 func (n *Node) handlePush(s network.Stream) {
 	defer s.Close()
 
-	accepted := n.acceptPush == nil
-	if !accepted {
-		if pk := s.Conn().RemotePublicKey(); pk != nil {
-			if raw, err := pk.Raw(); err == nil {
-				accepted = n.acceptPush(raw)
-			}
-		}
+	var rawPub []byte
+	if pk := s.Conn().RemotePublicKey(); pk != nil {
+		rawPub, _ = pk.Raw()
 	}
+	accepted := n.acceptPush == nil || (rawPub != nil && n.acceptPush(rawPub))
 	if !accepted {
 		s.Write([]byte{0})
 		return
@@ -53,6 +53,7 @@ func (n *Node) handlePush(s network.Stream) {
 		return
 	}
 	var stored uint32
+	var storedBytes int64
 	for i := uint32(0); i < count; i++ {
 		id, data, err := readObject(br)
 		if err != nil {
@@ -63,8 +64,12 @@ func (n *Node) handlePush(s network.Stream) {
 		}
 		n.provideStored(id)
 		stored++
+		storedBytes += int64(len(data))
 	}
 	binary.Write(s, binary.BigEndian, stored)
+	if n.onStored != nil && rawPub != nil {
+		n.onStored(rawPub, storedBytes)
+	}
 }
 
 // provideStored best-effort announces a stored object to the DHT.

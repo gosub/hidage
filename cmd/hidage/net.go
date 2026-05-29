@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"hidage/internal/accounting"
 	"hidage/internal/config"
 	"hidage/internal/dag"
 	"hidage/internal/netstore"
@@ -48,6 +49,8 @@ func publishedStore() (*store.KeyedStore, error) {
 func newServeCmd() *cobra.Command {
 	var listen string
 	var bootstrap []string
+	var ratio float64
+	var freeMiB int64
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run a node: serve objects, accept pushes from trusted peers, join the DHT",
@@ -79,9 +82,21 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			node.EnablePush(pub, func(senderPub []byte) bool {
-				return policy.Verdict(ed25519.PublicKey(senderPub)) != trust.Blocked
-			})
+			ledger, err := accounting.Load(paths.AccountingPath)
+			if err != nil {
+				return err
+			}
+			free := freeMiB << 20
+			node.EnablePush(pub,
+				func(senderPub []byte) bool {
+					if policy.Verdict(ed25519.PublicKey(senderPub)) == trust.Blocked {
+						return false
+					}
+					return ledger.Allow(hex.EncodeToString(senderPub), 0, ratio, free)
+				},
+				func(senderPub []byte, b int64) {
+					ledger.AddStoredForThem(hex.EncodeToString(senderPub), b)
+				})
 			if err := node.Bootstrap(ctx, bootstrap); err != nil {
 				return err
 			}
@@ -98,6 +113,8 @@ func newServeCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&listen, "listen", "", "listen multiaddr (default: ephemeral TCP on all interfaces)")
 	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
+	cmd.Flags().Float64Var(&ratio, "ratio", accounting.DefaultRatio, "max bytes stored per peer per byte they store for us")
+	cmd.Flags().Int64Var(&freeMiB, "free", accounting.DefaultFreeQuota>>20, "free quota per peer, in MiB (no reciprocation required)")
 	return cmd
 }
 
@@ -157,13 +174,22 @@ func newPublishCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			ledger, err := accounting.Load(paths.AccountingPath)
+			if err != nil {
+				return err
+			}
+			var totalBytes int64
+			for _, d := range objs {
+				totalBytes += int64(len(d))
+			}
 			for _, addr := range peers {
 				pid, err := node.Connect(ctx, addr)
 				if err != nil {
 					fmt.Printf("  %s: %v\n", addr, err)
 					continue
 				}
-				if pubHex, err := p2p.PeerPubKeyHex(pid); err == nil && !acceptablePeer(policy, rep, pubHex) {
+				pubHex, _ := p2p.PeerPubKeyHex(pid)
+				if pubHex != "" && !acceptablePeer(policy, rep, pubHex) {
 					fmt.Printf("  %s: skipped (blocked or low reputation)\n", pid)
 					continue
 				}
@@ -172,7 +198,10 @@ func newPublishCmd() *cobra.Command {
 					fmt.Printf("  %s: %v\n", pid, err)
 					continue
 				}
-				fmt.Printf("  %s: stored %d/%d objects\n", pid, stored, len(objs))
+				if stored == len(objs) && pubHex != "" {
+					ledger.AddTheyStoreForUs(pubHex, totalBytes)
+				}
+				fmt.Printf("  %s: stored %d/%d objects (%d bytes)\n", pid, stored, len(objs), totalBytes)
 			}
 			if err := node.PutHead(ctx, kr.Identity(), snap.ID); err != nil {
 				return fmt.Errorf("publish head: %w", err)

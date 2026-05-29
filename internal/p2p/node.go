@@ -40,6 +40,7 @@ type Node struct {
 	dht        *dht.IpfsDHT
 	sink       Sink
 	acceptPush func(senderPub []byte) bool
+	onStored   func(senderPub []byte, bytes int64)
 }
 
 // New starts a libp2p host whose peer ID is derived from id (the node's Ed25519

@@ -31,6 +31,8 @@ type Paths struct {
 	TrustPath string
 	// ReputationPath is the node's per-peer audit history.
 	ReputationPath string
+	// AccountingPath is the node's per-peer space ledger.
+	AccountingPath string
 }
 
 // DataStoreDir returns the node-wide chunk store path: $HIDAGE_STORE if set,
@@ -58,6 +60,7 @@ func Resolve() (Paths, error) {
 		KeyringPath:    filepath.Join(dir, "keyring.json"),
 		TrustPath:      filepath.Join(dir, "trust.json"),
 		ReputationPath: filepath.Join(dir, "reputation.json"),
+		AccountingPath: filepath.Join(dir, "accounting.json"),
 	}, nil
 }
 

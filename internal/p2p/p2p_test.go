@@ -159,7 +159,7 @@ func TestPushTrustAndHead(t *testing.T) {
 	sink, _ := store.NewKeyedStore(t.TempDir())
 	s, _ := newNodeID(t, sink)
 	s.EnableDHT(ctx)
-	s.EnablePush(sink, nil) // accept from anyone
+	s.EnablePush(sink, nil, nil) // accept from anyone
 
 	// Owner node A.
 	emptyA, _ := store.NewFSStore(t.TempDir())
@@ -213,7 +213,7 @@ func TestPushRefusedWhenBlocked(t *testing.T) {
 
 	sink, _ := store.NewKeyedStore(t.TempDir())
 	s, _ := newNodeID(t, sink)
-	s.EnablePush(sink, func(pub []byte) bool { return false }) // refuse everyone
+	s.EnablePush(sink, func(pub []byte) bool { return false }, nil) // refuse everyone
 
 	emptyA, _ := store.NewFSStore(t.TempDir())
 	a, _ := newNodeID(t, emptyA)
