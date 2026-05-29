@@ -6,12 +6,13 @@ instead of a central server. Each node contributes more local disk than it consu
 remotely (e.g. 2–4×), trading abundant local space for durable remote storage, while a
 reputation ledger tracks which hosts are reliable.
 
-> **Status: local, no networking yet.** What works today is the encrypted, **versioned
-> storage core**: a content-addressed repository with incremental snapshots, history,
-> diff, and pruning (git/restic-style). Distributing shards over a P2P network — where
-> the fountain coding and reputation ledger come in — is the next phase (see
-> [Roadmap](#roadmap)). The code is structured behind interfaces (notably `Store`) so
-> those layers drop in without rework.
+> **Status: networked.** The encrypted **versioned storage core** (content-addressed
+> repository with incremental snapshots, history, diff, prune) now distributes over a
+> **libp2p P2P network**: nodes discover objects via a Kademlia DHT, replicate a
+> snapshot's objects to trusted peers, and publish a signed head pointer — so a backup is
+> recoverable on a fresh machine from just the **recovery phrase + one bootstrap peer**.
+> Still to come (Phase 4+): a reputation ledger, fountain-coded redundancy for
+> distribution, and IP-level anonymity (see [Roadmap](#roadmap)).
 
 ## How it works
 
@@ -76,6 +77,14 @@ hidage recover                    # on a new machine: rebuild the keyring from t
 hidage trust add <pubkey>         # trust a peer's key (bypass reputation, friend-to-friend)
 hidage trust block <pubkey>       # block a peer's key (never interact)
 hidage trust list                 # show trusted / blocked keys
+
+# networking (Phase 3)
+hidage serve --listen /ip4/0.0.0.0/tcp/4001   # run a node: join the DHT, serve objects,
+                                              #   accept pushes from non-blocked peers
+hidage publish --peer <addr> --bootstrap <addr>   # push the latest snapshot's objects to
+                                                  #   storage peers + publish a signed head pointer
+hidage net-restore ./out --bootstrap <addr>   # recover from the network: resolve your head,
+                                              #   pull the snapshot + objects, restore
 ```
 
 - A tracked folder is one containing `.hidage/`; `snapshot` creates it on first use.
@@ -90,9 +99,9 @@ hidage trust list                 # show trusted / blocked keys
 - **Recovery:** `recovery-code` prints a 24-word BIP39 phrase encoding the root secret
   (master key + identity). Keep it offline — anyone with it can decrypt your backups, and
   it's the only way to get your key back if you lose this machine. `hidage recover` reads
-  the phrase from stdin and rebuilds the keyring (under a new passphrase). *(Recovering
-  the snapshots/chunks themselves from peers is Phase 3f — for now their `.hidage` and the
-  chunk store must still exist.)*
+  the phrase from stdin and rebuilds the keyring (under a new passphrase). With the phrase
+  plus a bootstrap peer, `hidage net-restore` rebuilds the snapshots and files from the
+  network — no local `.hidage` or chunk store needed.
 
 ## End-to-end demo
 
@@ -136,8 +145,11 @@ reachability, both stores (FS + hardlink cross-repo dedup and refcounted delete)
 keyring (deterministic derivation, wrong-pass, recovery-code roundtrip), and the
 repository end to end — snapshot/restore,
 `.hidage` exclusion, incremental-delta accounting, history/diff, `--replace`, and
-forget + prune. The `shard` (fountain-coding) package is tested standalone, reserved for
-the distribution phase.
+forget + prune. Networking: two-node object transfer, DHT provide/discover, push gated by
+trust, signed head publish/resolve, and a full **cross-node recovery** integration test
+(owner publishes to a storage peer, leaves, a fresh node restores everything from the
+network). The `shard` (fountain-coding) package is tested standalone, reserved for
+redundant distribution.
 
 ## Project layout
 
@@ -153,12 +165,16 @@ the distribution phase.
 | `internal/chunk` | content-defined chunking (FastCDC) |
 | `internal/dag` | Merkle DAG: chunk/file/tree nodes (meta store) routed apart from chunk data |
 | `internal/repo` | versioned repository: `.hidage` layout, snapshots, restore, diff, prune |
-| `internal/shard` | fountain encode/decode (`google/gofountain`); reserved for Phase 3 distribution |
+| `internal/p2p` | libp2p host (peer key = identity), object/push protocols, Kademlia DHT, signed head pointers |
+| `internal/netstore` | network-backed object source (DHT discover + fetch) for restoring from peers |
+| `internal/shard` | fountain encode/decode (`google/gofountain`); reserved for redundant distribution |
 
 ## Known limitations
 
-- **No networking yet** — objects live only in the local stores; nothing is distributed.
-  Fountain-coded redundancy across peers arrives with networking (Phase 3).
+- **No automatic replication/redundancy yet** — `publish` pushes to the storage peers you
+  name, and data is fetched from whoever has it; choosing peers automatically and
+  fountain-coded redundancy (surviving the loss of a minority of peers) come with the
+  reputation phase.
 - **Pseudonymous, not IP-anonymous** — peers are identified by public key; IP-level
   anonymity is a later phase.
 - **Single-writer** — snapshots assume one owner per repository; concurrent writers from
@@ -175,17 +191,16 @@ the distribution phase.
 - **Phase 2 — versioned storage core.** ✅ Done. The repository: content-defined chunking
   + Merkle DAG + signed snapshots, so updating/changing/removing files re-stores only the
   delta, with history and prune/GC.
-- **Phase 3 — networking + trust + recovery.** *In progress.* ✅ **Recovery code** — keys
-  derive from one root, exportable as a 24-word phrase (`recovery-code` / `recover`).
-  ✅ **Trust/whitelist policy** — `hidage trust add/block/list` (prefer/block specific keys,
-  friend-to-friend), consulted before reputation. Remaining: go-libp2p host keyed by the
-  Ed25519 identity, Kademlia DHT for discovery, and shard transfer behind the existing
-  `Store` interface (objects grouped into packs, each fountain-sharded for redundant
-  distribution); and the rest of **disaster recovery** — distributing snapshots + DAG
-  nodes (not just chunks) and a signed DHT head pointer, so a backup is restorable from
-  just the recovery phrase + a peer (see [`DESIGN.md`](DESIGN.md)).
-- **Phase 4 — reputation.** Proof-of-storage audit challenges, signed receipts, and space
-  accounting for the 2–4× contribution model.
+- **Phase 3 — networking + trust + recovery.** ✅ Done. Recovery code (`recovery-code` /
+  `recover`); trust/whitelist policy (`trust …`); a **libp2p** node (`serve`) keyed by the
+  Ed25519 identity with object + push protocols and a **Kademlia DHT**; `publish`
+  replicates a snapshot's objects (bytes, DAG nodes, chunks) to trusted peers and posts a
+  **signed head pointer**; `net-restore` rebuilds a backup from the network with only the
+  recovery phrase + a bootstrap peer. (Objects are distributed directly; fountain-coded
+  *redundancy* across many peers is folded in with the reputation phase.)
+- **Phase 4 — reputation + redundancy.** Proof-of-storage audit challenges, signed
+  receipts, space accounting for the 2–4× model; objects grouped into packs and
+  fountain-sharded (`internal/shard`) so data survives the loss of any minority of peers.
 - **Phase 5 — anonymity routing.** Optional Tor / Veilid transport to hide IPs.
 
 > A paid storage service is **only an idea, not a planned feature.** The chosen

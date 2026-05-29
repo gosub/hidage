@@ -206,7 +206,35 @@ Neutral  → defer to the reputation score (Phase 4)
 (trusting a key clears any block and vice-versa). Managed via `hidage trust
 add/remove/block/unblock/list`. The decision is a pure function of `(pubkey, policy)` plus
 the future reputation score, so it is fully testable before any networking exists and
-simply becomes load-bearing once peers are real.
+simply becomes load-bearing once peers are real. The networking layer consults it when
+accepting pushed objects.
+
+---
+
+## Networking (`internal/p2p`, `internal/netstore`)
+
+A node is a **libp2p host whose peer ID is its Ed25519 identity** (so a recovered node has
+the same peer ID as the original). It speaks three things:
+
+- **Object protocol** (`/hidage/object/1.0.0`) — request an object by content address,
+  receive its bytes. Objects are already encrypted/signed, so serving to anyone is safe.
+- **Push protocol** (`/hidage/push/1.0.0`) — replicate a snapshot's objects to a peer that
+  agrees to store them. The receiver identifies the sender from the secured connection's
+  public key and consults its **trust policy** (store unless `Blocked`), then re-announces
+  what it stored to the DHT.
+- **Kademlia DHT** (`/hidage` prefix) — `Provide`/`FindProviders` map an object's content
+  address (a raw CIDv1 over its SHA-256) to the peers holding it, and **signed head
+  pointers** (`/hidage/<ownerpubkey>` → latest snapshot id) let a peer find an owner's
+  current snapshot with no local state. A namespaced record validator verifies the head
+  signature on put and get and selects the newest.
+
+`publish` gathers a snapshot's object closure (`repo.PublishSet`: snapshot bytes + every
+reachable DAG node + chunk), pushes it to storage peers, and posts the head pointer.
+`net-restore` does the reverse: resolve the head by the owner's public key, then drive the
+**ordinary restore walk over a `netstore`** — a `dag.Getter` that fetches each object via
+DHT discovery + the object protocol (caching locally) and decrypts it with the master key.
+Because restore runs against any `dag.Getter`, the same code restores from local disk or
+from peers.
 
 ---
 
@@ -227,57 +255,54 @@ simply becomes load-bearing once peers are real.
 
 ## What's deliberately deferred
 
-- **Networking** — go-libp2p host, Kademlia DHT discovery, and object transfer behind the
-  `Store` interface. *(planned, Phase 3)*
-- **Fountain-coded distribution** — the rateless coding primitive already exists
-  (`internal/shard`, R10 Raptor via `google/gofountain`: split data into `K` source
-  symbols, emit `M ≥ K` encoded shards, reconstruct from any `K`-plus-overhead subset).
-  It buys redundancy across *unreliable peers*, so it is layered on with networking —
-  repository objects grouped into ~4–16 MiB packs, each fountain-sharded for distribution
-  — rather than wasted on local storage. *(planned, Phase 3)*
-- **Trust / whitelist** — ✅ *implemented* (`internal/trust`, see above): prefer or block
-  specific keys before reputation. It becomes load-bearing once the networking layer
-  consults it at placement/acceptance.
+- **Networking** — ✅ *implemented* (`internal/p2p`, `internal/netstore`, see above):
+  libp2p host, object/push protocols, Kademlia DHT, signed head pointers.
+- **Trust / whitelist** — ✅ *implemented* (`internal/trust`): prefer or block specific keys
+  before reputation; consulted when accepting pushes.
+- **Disaster recovery** — ✅ *implemented* (see below): recover from the network with only
+  the recovery phrase + a bootstrap peer.
 - **Reputation** — proof-of-storage audits, signed receipts, space accounting for the 2–4×
   contribution model. *(planned, Phase 4)*
+- **Fountain-coded redundancy** — the rateless primitive exists (`internal/shard`, R10
+  Raptor via `google/gofountain`: split data into `K` source symbols, emit `M ≥ K` encoded
+  shards, reconstruct from any `K`-plus-overhead subset). Today objects are distributed
+  directly; grouping them into ~4–16 MiB packs and fountain-sharding each — so data
+  survives the loss of a minority of peers — lands with the reputation phase. *(planned,
+  Phase 4)*
 - **Anonymity routing** — optional Tor / Veilid transport. *(planned, Phase 5)*
 
-### Disaster recovery — rebuild from the network with no local state *(planned, Phase 3)*
+### Disaster recovery — rebuild from the network with no local state
 
-The point of distribution is surviving total loss of the original machine. To restore, you
-walk the DAG from the top, pulling each object from the network by its `cipherID` and
-decrypting it with the master key (`fp` for each object is carried in its parent):
+Surviving total loss of the original machine works today. To restore, a node walks the DAG
+from the top, pulling each object from the network by its content address and decrypting it
+with the master key (`fp` for each object is carried in its parent):
 
 ```
-snapshot ──▶ root Ref ──▶ tree nodes ──▶ file nodes ──▶ chunk Refs
-   pull+verify    decrypt      decrypt        decrypt       pull (reassemble from any
-   (signature)                                              K-of-M fountain shards) + decrypt
+head pointer ──▶ snapshot ──▶ root Ref ──▶ tree nodes ──▶ file nodes ──▶ chunk Refs
+ (DHT, by         pull+verify    decrypt      decrypt        decrypt      pull + decrypt
+  owner pubkey)   (signature)
 ```
 
-For this to actually work, three things the current build keeps only locally must change:
+The three things this needs — all now in place:
 
-1. **Distribute snapshots and DAG nodes, not just chunks.** Today the snapshot roots
-   (`.hidage/snapshots/`) and structure nodes (`.hidage/objects/`) live only in the
-   tracked folder — lost with the originals. They are tiny and must be replicated to the
-   network like any other object, or the chunk data is unusable (no recipe to reassemble
-   it).
+1. **Distribute snapshots and DAG nodes, not just chunks.** ✅ `repo.PublishSet` gathers a
+   snapshot's whole closure — the signed snapshot bytes, every reachable DAG node, and
+   every chunk — and `publish` replicates all of it, so the recipe travels with the data
+   rather than dying with the original `.hidage`.
 
-2. **Make the keys recoverable.** ✅ *Done* — both the master key and the identity derive
-   from a single 32-byte root, exportable as a 24-word BIP39 phrase (`hidage
-   recovery-code`) and restorable with `hidage recover`. So losing the key file no longer
-   means losing the data, *provided you kept the phrase*. (This recovers the **keys**;
-   recovering the snapshots/chunks themselves still depends on item 1.)
+2. **Make the keys recoverable.** ✅ Both the master key and the identity derive from a
+   single 32-byte root, exportable as a 24-word BIP39 phrase (`recovery-code`) and
+   restorable with `recover`.
 
-3. **Find the latest snapshot with zero local state.** Publish an IPNS-style **signed head
-   pointer** in the DHT keyed by the owner's identity public key (`pubkey → latest snapshot
-   id`, signed by the identity key), refreshed on each snapshot. Recovery then needs only
-   the identity (derivable from the recovery code) to locate the head — no snapshot ID to
-   remember.
+3. **Find the latest snapshot with zero local state.** ✅ An IPNS-style **signed head
+   pointer** in the DHT, keyed by the owner's public key (`pubkey → latest snapshot id`,
+   signed by the identity key), posted on `publish`. Recovery needs only the identity
+   (from the recovery code) to locate the head — no snapshot id to remember.
 
-**Minimal recovery seed.** With those in place, recovering an arbitrarily large dataset
-needs only a tiny off-machine secret plus a way onto the network: a passphrase-protected
-**recovery code encoding {master key, identity key}**, and at least one **bootstrap peer**.
-From there: identity → DHT head lookup → fetch+verify snapshot → walk the DAG, pulling and
-decrypting nodes and chunks → reassemble.
+**Minimal recovery seed.** Recovering an arbitrarily large dataset needs only a tiny
+off-machine secret plus a way onto the network: the **24-word recovery phrase** (which
+reproduces both the master key and the identity) and at least one **bootstrap peer**. From
+there `net-restore` does: identity → DHT head lookup → fetch+verify snapshot → walk the
+DAG, pulling and decrypting nodes and chunks from providers → reassemble.
 
 See the [README roadmap](README.md#roadmap) for phase ordering.
