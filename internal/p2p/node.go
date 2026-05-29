@@ -8,6 +8,7 @@ package p2p
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/libp2p/go-libp2p"
@@ -97,3 +98,17 @@ func (n *Node) Connect(ctx context.Context, addr string) (peer.ID, error) {
 
 // Close shuts the host down.
 func (n *Node) Close() error { return n.host.Close() }
+
+// PeerPubKeyHex returns the hex Ed25519 public key for a peer ID (the key is
+// inlined in the ID), matching the format used by the trust and reputation stores.
+func PeerPubKeyHex(id peer.ID) (string, error) {
+	pub, err := id.ExtractPublicKey()
+	if err != nil {
+		return "", err
+	}
+	raw, err := pub.Raw()
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw), nil
+}

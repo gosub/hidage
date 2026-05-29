@@ -33,6 +33,8 @@ func main() {
 		newServeCmd(),
 		newPublishCmd(),
 		newNetRestoreCmd(),
+		newReputationCmd(),
+		newAuditCmd(),
 	)
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

@@ -18,9 +18,27 @@ import (
 	"hidage/internal/netstore"
 	"hidage/internal/p2p"
 	"hidage/internal/repo"
+	"hidage/internal/reputation"
 	"hidage/internal/store"
 	"hidage/internal/trust"
 )
+
+// acceptablePeer reports whether to push to a peer: never if blocked, always if
+// explicitly trusted, otherwise unless its audit reputation is known-bad.
+func acceptablePeer(policy *trust.Policy, rep *reputation.Store, pubHex string) bool {
+	raw, err := hex.DecodeString(pubHex)
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		return false
+	}
+	switch policy.Verdict(ed25519.PublicKey(raw)) {
+	case trust.Blocked:
+		return false
+	case trust.Trusted:
+		return true
+	default:
+		return !rep.Bad(pubHex)
+	}
+}
 
 // publishedStore is the node-wide store of objects this node serves to the network.
 func publishedStore() (*store.KeyedStore, error) {
@@ -127,10 +145,26 @@ func newPublishCmd() *cobra.Command {
 			if err := node.Bootstrap(ctx, bootstrap); err != nil {
 				return err
 			}
+			paths, err := config.Ensure()
+			if err != nil {
+				return err
+			}
+			policy, err := trust.Load(paths.TrustPath)
+			if err != nil {
+				return err
+			}
+			rep, err := reputation.Load(paths.ReputationPath)
+			if err != nil {
+				return err
+			}
 			for _, addr := range peers {
 				pid, err := node.Connect(ctx, addr)
 				if err != nil {
 					fmt.Printf("  %s: %v\n", addr, err)
+					continue
+				}
+				if pubHex, err := p2p.PeerPubKeyHex(pid); err == nil && !acceptablePeer(policy, rep, pubHex) {
+					fmt.Printf("  %s: skipped (blocked or low reputation)\n", pid)
 					continue
 				}
 				stored, err := node.PushObjects(ctx, pid, objs)

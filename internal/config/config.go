@@ -29,6 +29,8 @@ type Paths struct {
 	KeyringPath string
 	// TrustPath is the node's trust/whitelist policy file.
 	TrustPath string
+	// ReputationPath is the node's per-peer audit history.
+	ReputationPath string
 }
 
 // DataStoreDir returns the node-wide chunk store path: $HIDAGE_STORE if set,
@@ -52,9 +54,10 @@ func Resolve() (Paths, error) {
 	}
 	dir := filepath.Join(base, AppName)
 	return Paths{
-		Dir:         dir,
-		KeyringPath: filepath.Join(dir, "keyring.json"),
-		TrustPath:   filepath.Join(dir, "trust.json"),
+		Dir:            dir,
+		KeyringPath:    filepath.Join(dir, "keyring.json"),
+		TrustPath:      filepath.Join(dir, "trust.json"),
+		ReputationPath: filepath.Join(dir, "reputation.json"),
 	}, nil
 }
 
