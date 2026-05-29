@@ -6,11 +6,12 @@ network instead of a central server. Each node contributes more local disk than 
 consumes remotely (e.g. 2–4×), trading abundant local space for durable remote
 storage, while a future reputation ledger tracks which hosts are reliable.
 
-> **Status: Phase 1 (MVP) — local core.** This milestone implements the full data
-> pipeline locally, with no networking yet. Shards are kept in a local
-> content-addressed store. The networking, reputation ledger, and anonymity layers
-> are planned for later phases (see [Roadmap](#roadmap)). The code is deliberately
-> structured behind interfaces so those layers drop in without rework.
+> **Status: local, no networking yet.** Two storage models are implemented locally:
+> the **Phase 1 one-shot** pipeline (`backup`/`restore`, below) and the **Phase 2
+> versioned repository** (`repo`, [below](#versioned-storage-repo-phase-2)) with
+> incremental snapshots, history, and pruning. Networking, the reputation ledger, and
+> anonymity are later phases (see [Roadmap](#roadmap)); the code is structured behind
+> interfaces so they drop in without rework.
 
 ## How it works
 
@@ -80,29 +81,67 @@ hidage restore s.hmanifest ./out
 diff -r sampledir out/sampledir && echo "restored identically"
 ```
 
+## Versioned storage (`repo`, Phase 2)
+
+The one-shot `backup` above re-shards everything when a single file changes. The `repo`
+command instead keeps a **versioned repository** that re-stores only what changed —
+like git/restic:
+
+- **Content-defined chunking (FastCDC):** files are split on content, so editing one
+  file (or inserting bytes mid-file) only changes nearby chunks.
+- **Merkle DAG:** chunks → file nodes → directory (tree) nodes → a root, each
+  content-addressed. An unchanged subtree keeps its hash and is never re-stored.
+- **Signed snapshots:** each version is an Ed25519-signed root chained to its parent,
+  giving a restorable history. Removing a file is just a new snapshot that omits it.
+- **Per-repo deterministic encryption:** the same plaintext chunk always encrypts to the
+  same bytes (key/nonce derived from the repo master key + an HMAC fingerprint), so
+  unchanged chunks dedup — without leaking chunk-equality across users.
+
+```sh
+hidage init                              # node identity (signs snapshots)
+hidage repo init ./vault                 # create a repository
+
+hidage repo snapshot ./vault ./project   # take a snapshot (incremental)
+hidage repo snapshots ./vault            # list history
+hidage repo diff ./vault <idA> <idB>     # changed/added/removed paths
+hidage repo restore ./vault <id> ./out   # materialize a version
+hidage repo forget ./vault <id>          # drop a snapshot record …
+hidage repo prune ./vault                # … then GC objects nothing references
+```
+
+Snapshot IDs may be given as any unambiguous prefix. Re-snapshotting an unchanged tree
+stores **0** new objects; changing one small file stores only that file's new chunk plus
+the handful of tree nodes on the path to the root, even if the repo holds large
+unchanged files alongside it.
+
 ## Tests
 
 ```sh
 go test ./...
 ```
 
-Coverage includes the encryption round-trip (plus wrong-key/truncation/corruption
-rejection), the fountain encode/decode from a random shard subset (and failure below
-the threshold), deterministic archive pack/unpack, manifest sign/verify/tamper
-detection, and the content-addressed store.
+Coverage includes: Phase 1 — encryption round-trip (wrong-key/truncation/corruption
+rejection), fountain encode/decode from a random shard subset (and sub-threshold
+failure), deterministic archive pack/unpack, manifest sign/verify/tamper, the
+content-addressed store. Phase 2 — deterministic chunk encryption, content-defined
+chunk stability under insertion, DAG round-trip/diff/reachability, and repository
+snapshot/restore/incremental-delta/forget+prune/history.
 
 ## Project layout
 
 | Path | Responsibility |
 |---|---|
-| `cmd/hidage` | CLI commands (`init`, `backup`, `restore`, `info`, `verify`) |
+| `cmd/hidage` | CLI commands (`init`, `backup`, `restore`, `info`, `verify`, `repo …`) |
 | `internal/config` | XDG config/store path resolution |
 | `internal/identity` | Ed25519 node identity (future libp2p peer key) |
 | `internal/archive` | folder ↔ deterministic tar; single-file passthrough |
-| `internal/crypto` | Argon2id KEK, DEK wrap/unwrap, chunked ChaCha20-Poly1305 |
+| `internal/crypto` | Argon2id KEK, DEK wrap/unwrap, chunked AEAD + deterministic content-addressed seal |
 | `internal/shard` | fountain encode/decode (wraps `google/gofountain`) |
 | `internal/store` | `Store` interface + local content-addressed FS store |
-| `internal/manifest` | signed recovery recipe |
+| `internal/manifest` | signed recovery recipe (Phase 1 one-shot) |
+| `internal/chunk` | content-defined chunking (FastCDC) |
+| `internal/dag` | Merkle DAG: chunk/file/tree nodes, diff, reachability |
+| `internal/repo` | versioned repository: snapshots, restore, diff, prune |
 
 ## Known limitations (MVP)
 
@@ -122,11 +161,12 @@ detection, and the content-addressed store.
 
 - **Phase 1 — local core.** ✅ Done. The monolithic pipeline above: pack → encrypt →
   fountain-shard → store, restore from any sufficient subset, signed manifest.
-- **Phase 2 — versioned storage core.** Replace the monolithic blob with **content-defined
+- **Phase 2 — versioned storage core.** ✅ Done. The `repo` command: **content-defined
   chunking + a Merkle DAG + signed snapshots**, so updating, changing, or removing files
   re-stores only the delta (git/restic-style), with history kept. Per-repo deterministic
   encryption gives content-addressed dedup within your own data without leaking
-  chunk-equality across users.
+  chunk-equality across users. (Fountain re-sharding of objects for redundant
+  *distribution* lands with networking in Phase 3, where it actually matters.)
 - **Phase 3 — networking + trust.** go-libp2p host keyed by the Ed25519 identity,
   Kademlia DHT for discovery, pack/shard transfer behind the existing `Store` interface;
   plus a **trust/whitelist policy** letting a node bypass reputation for keys it
