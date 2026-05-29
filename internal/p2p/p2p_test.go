@@ -82,3 +82,57 @@ func TestFetchObjectBetweenNodes(t *testing.T) {
 		t.Fatalf("want ErrObjectNotFound, got %v", err)
 	}
 }
+
+func TestDHTProvideAndFind(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	storeA, _ := store.NewFSStore(t.TempDir())
+	data := []byte("discoverable object")
+	id, _ := storeA.Put(data)
+
+	a := newNode(t, storeA)
+	storeB, _ := store.NewFSStore(t.TempDir())
+	b := newNode(t, storeB)
+
+	if err := a.EnableDHT(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.EnableDHT(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// B bootstraps off A; both seed routing tables.
+	if err := b.Bootstrap(ctx, a.Addrs()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Bootstrap(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Provide from A and discover from B, polling until the record propagates.
+	var found bool
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) && !found {
+		_ = a.Provide(ctx, id)
+		provs, _ := b.FindProviders(ctx, id)
+		for _, p := range provs {
+			if p.ID == a.ID() {
+				found = true
+			}
+		}
+		if !found {
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+	if !found {
+		t.Fatal("B did not discover A as a provider via the DHT")
+	}
+
+	got, err := b.FetchObject(ctx, a.ID(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("fetched object via DHT-discovered provider does not match")
+	}
+}

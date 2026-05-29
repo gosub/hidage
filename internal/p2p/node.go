@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	"github.com/libp2p/go-libp2p"
+	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -29,6 +30,7 @@ type Blobs interface {
 type Node struct {
 	host  host.Host
 	blobs Blobs
+	dht   *dht.IpfsDHT
 }
 
 // New starts a libp2p host whose peer ID is derived from id (the node's Ed25519
