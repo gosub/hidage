@@ -3,9 +3,9 @@ module hidage
 go 1.26.3
 
 require (
-	github.com/google/gofountain v0.0.0-20160820054803-4928733085e9
 	github.com/ipfs/go-cid v0.6.1
 	github.com/jotfs/fastcdc-go v0.2.0
+	github.com/klauspost/reedsolomon v1.14.0
 	github.com/libp2p/go-libp2p v0.48.0
 	github.com/libp2p/go-libp2p-kad-dht v0.40.0
 	github.com/multiformats/go-multiaddr v0.16.1

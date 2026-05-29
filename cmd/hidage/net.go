@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/spf13/cobra"
 
 	"hidage/internal/accounting"
@@ -18,6 +20,7 @@ import (
 	"hidage/internal/dag"
 	"hidage/internal/netstore"
 	"hidage/internal/p2p"
+	"hidage/internal/pack"
 	"hidage/internal/repo"
 	"hidage/internal/reputation"
 	"hidage/internal/store"
@@ -120,9 +123,10 @@ func newServeCmd() *cobra.Command {
 
 func newPublishCmd() *cobra.Command {
 	var bootstrap, peers []string
+	var redundancy float64
 	cmd := &cobra.Command{
 		Use:   "publish",
-		Short: "Push the latest snapshot's objects to storage peers and publish the head pointer",
+		Short: "Erasure-code the latest snapshot, spread shards across peers, publish the head",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kr, err := unlock()
@@ -149,12 +153,24 @@ func newPublishCmd() *cobra.Command {
 				return err
 			}
 
+			// Erasure-code the snapshot's objects into shards; the Release
+			// descriptor (pushed to every peer) records how to reassemble them.
+			rel, shardBlobs, err := pack.Build(objs, redundancy, snap.ID)
+			if err != nil {
+				return err
+			}
+			relBytes, err := json.Marshal(rel)
+			if err != nil {
+				return err
+			}
+			relID := store.ID(relBytes)
+
 			node, err := p2p.New(kr.Identity(), nil, "")
 			if err != nil {
 				return err
 			}
 			defer node.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
 			if err := node.EnableDHT(ctx); err != nil {
 				return err
@@ -178,10 +194,10 @@ func newPublishCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var totalBytes int64
-			for _, d := range objs {
-				totalBytes += int64(len(d))
-			}
+
+			// Filter peers by trust + reputation, then spread the shards across
+			// the survivors so losing a minority of them still leaves K per pack.
+			var accepted []peerID
 			for _, addr := range peers {
 				pid, err := node.Connect(ctx, addr)
 				if err != nil {
@@ -193,26 +209,61 @@ func newPublishCmd() *cobra.Command {
 					fmt.Printf("  %s: skipped (blocked or low reputation)\n", pid)
 					continue
 				}
-				stored, err := node.PushObjects(ctx, pid, objs)
+				accepted = append(accepted, peerID{id: pid, pubHex: pubHex})
+			}
+			if len(accepted) == 0 {
+				return fmt.Errorf("no acceptable peers to publish to")
+			}
+
+			assignments := spreadShards(shardBlobs, relID, relBytes, len(accepted))
+			for i, p := range accepted {
+				push := assignments[i]
+				var bytes int64
+				for _, d := range push {
+					bytes += int64(len(d))
+				}
+				stored, err := node.PushObjects(ctx, p.id, push)
 				if err != nil {
-					fmt.Printf("  %s: %v\n", pid, err)
+					fmt.Printf("  %s: %v\n", p.id, err)
 					continue
 				}
-				if stored == len(objs) && pubHex != "" {
-					ledger.AddTheyStoreForUs(pubHex, totalBytes)
+				if stored == len(push) && p.pubHex != "" {
+					ledger.AddTheyStoreForUs(p.pubHex, bytes)
 				}
-				fmt.Printf("  %s: stored %d/%d objects (%d bytes)\n", pid, stored, len(objs), totalBytes)
+				fmt.Printf("  %s: stored %d shards (%d bytes)\n", p.id, stored, bytes)
 			}
-			if err := node.PutHead(ctx, kr.Identity(), snap.ID); err != nil {
+			if err := node.PutHead(ctx, kr.Identity(), relID); err != nil {
 				return fmt.Errorf("publish head: %w", err)
 			}
-			fmt.Printf("Published snapshot %s (%d objects); head pointer updated.\n", snap.ID[:16], len(objs))
+			fmt.Printf("Published snapshot %s as %d shards across %d peers (%.1fx redundancy); head updated.\n",
+				snap.ID[:16], len(shardBlobs), len(accepted), redundancy)
 			return nil
 		},
 	}
 	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
 	cmd.Flags().StringArrayVar(&peers, "peer", nil, "storage peer multiaddr(s) to push to")
+	cmd.Flags().Float64Var(&redundancy, "redundancy", 2.0, "shards to emit per shard needed (e.g. 2.0 tolerates losing half)")
 	return cmd
+}
+
+type peerID struct {
+	id     peer.ID
+	pubHex string
+}
+
+// spreadShards assigns shard blobs round-robin across n peers, and gives the
+// Release descriptor to every peer (so it can always be fetched).
+func spreadShards(shardBlobs map[string][]byte, relID string, relBytes []byte, n int) []map[string][]byte {
+	out := make([]map[string][]byte, n)
+	for i := range out {
+		out[i] = map[string][]byte{relID: relBytes}
+	}
+	i := 0
+	for id, data := range shardBlobs {
+		out[i%n][id] = data
+		i++
+	}
+	return out
 }
 
 func newNetRestoreCmd() *cobra.Command {
@@ -250,15 +301,15 @@ func newNetRestoreCmd() *cobra.Command {
 				return err
 			}
 
-			var snapID string
+			var relID string
 			deadline := time.Now().Add(60 * time.Second)
 			for time.Now().Before(deadline) {
-				if snapID, _ = node.GetHead(ctx, owner); snapID != "" {
+				if relID, _ = node.GetHead(ctx, owner); relID != "" {
 					break
 				}
 				time.Sleep(time.Second)
 			}
-			if snapID == "" {
+			if relID == "" {
 				return fmt.Errorf("could not resolve a head pointer for that owner")
 			}
 
@@ -267,15 +318,31 @@ func newNetRestoreCmd() *cobra.Command {
 				return err
 			}
 			ns := netstore.New(node, cache)
-			snapBytes, err := ns.Get(snapID)
+
+			// Fetch the Release, then gather K-of-M shards per pack from whoever
+			// still has them and rebuild every object.
+			relBytes, err := ns.Get(relID)
 			if err != nil {
-				return fmt.Errorf("fetch snapshot: %w", err)
+				return fmt.Errorf("fetch release: %w", err)
 			}
-			snap, err := repo.ParseSnapshot(snapBytes)
+			var rel pack.Release
+			if err := json.Unmarshal(relBytes, &rel); err != nil {
+				return err
+			}
+			objects, err := pack.Reassemble(&rel, ns.Get)
+			if err != nil {
+				return fmt.Errorf("reassemble: %w", err)
+			}
+			for id, data := range objects {
+				if err := cache.Put(id, data); err != nil {
+					return err
+				}
+			}
+			snap, err := repo.ParseSnapshot(objects[rel.SnapshotID])
 			if err != nil {
 				return err
 			}
-			loader := dag.NewLoader(ns, ns, kr.MasterKey())
+			loader := dag.NewLoader(cache, cache, kr.MasterKey())
 			if err := repo.RestoreWith(loader, snap, args[0]); err != nil {
 				return err
 			}

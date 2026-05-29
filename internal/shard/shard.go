@@ -1,125 +1,130 @@
-// Package shard turns an encrypted blob into a set of fountain-coded shards and
-// back. It wraps the R10 Raptor codec from gofountain: the input is split into
-// K source symbols and expanded into M >= K encoded shards. Any sufficiently
-// large subset of shards (K plus a small coding overhead) reconstructs the
-// original blob, in any order. This is what lets hidage spread redundant shards
-// across many hosts and tolerate the loss of any minority of them.
+// Package shard adds erasure-coding redundancy: a blob is split into M shards of
+// which any K reconstruct it, so data survives losing up to M−K shards (e.g.
+// the peers holding them). It uses Reed-Solomon (klauspost/reedsolomon), which
+// gives exact K-of-M recovery — feed any K present shards (the rest marked
+// missing) and the original is rebuilt. M is fixed at encode time, which is all
+// hidage needs for distributing a pack across a known set of peers.
 package shard
 
 import (
+	"bytes"
 	"fmt"
 	"math"
 
-	fountain "github.com/google/gofountain"
+	"github.com/klauspost/reedsolomon"
 )
 
 const (
-	// alignment is the Raptor symbol XOR granularity (Al), in bytes.
-	alignment = 4
-	// targetSymbolSize guides the choice of K so shards stay a sane size.
-	targetSymbolSize = 64 * 1024
-	// minSymbols / maxSymbols are the Raptor R10 bounds on K.
-	minSymbols = 4
-	maxSymbols = 8192
-	// maxShards keeps BlockCode within the uint16 range the codec uses.
-	maxShards = 1 << 16
+	// targetShardSize guides how many data shards a blob splits into.
+	targetShardSize = 256 * 1024
+	// minDataShards is the floor on K.
+	minDataShards = 2
+	// maxTotalShards is the Reed-Solomon limit (GF(2^8)).
+	maxTotalShards = 255
 )
 
-// Params captures everything (besides the shards themselves) needed to decode.
-// These fields are persisted in the manifest.
+// Params captures everything (besides the shards) needed to decode. Persisted in
+// the pack descriptor.
 type Params struct {
-	Algorithm     string `json:"algorithm"`
-	SourceSymbols int    `json:"sourceSymbols"` // K: minimum count needed (plus overhead)
-	Alignment     int    `json:"alignment"`
-	MessageLen    int    `json:"messageLen"`  // exact ciphertext length, for trimming padding
-	TotalShards   int    `json:"totalShards"` // M
+	Algorithm   string `json:"algorithm"`
+	DataShards  int    `json:"dataShards"`  // K: the minimum needed to reconstruct
+	TotalShards int    `json:"totalShards"` // M
+	MessageLen  int    `json:"messageLen"`  // exact input length, to trim shard padding
 }
 
-// Shard is one encoded symbol. BlockCode identifies how the shard was composed
-// and is required, alongside Params, to decode.
+// Shard is one encoded shard, identified by its index 0..M-1.
 type Shard struct {
-	BlockCode int64
-	Data      []byte
+	Index int
+	Data  []byte
 }
 
-// chooseK picks the number of source symbols for a message of the given length.
-func chooseK(msgLen int) int {
-	k := int(math.Ceil(float64(msgLen) / float64(targetSymbolSize)))
-	if k < minSymbols {
-		k = minSymbols
+// chooseShards picks K (data shards) and M (total) for a blob of the given
+// length and redundancy, within Reed-Solomon's limits.
+func chooseShards(msgLen int, redundancy float64) (k, m int, err error) {
+	k = int(math.Ceil(float64(msgLen) / float64(targetShardSize)))
+	if k < minDataShards {
+		k = minDataShards
 	}
-	if k > maxSymbols {
-		k = maxSymbols
+	if k > msgLen { // can't have more data shards than bytes
+		k = msgLen
 	}
-	return k
+	// Keep M within the field limit.
+	if maxK := int(float64(maxTotalShards) / redundancy); k > maxK {
+		k = maxK
+	}
+	if k < 1 {
+		return 0, 0, fmt.Errorf("input too small to shard")
+	}
+	m = int(math.Ceil(float64(k) * redundancy))
+	if m <= k {
+		m = k + 1 // always at least one parity shard
+	}
+	if m > maxTotalShards {
+		m = maxTotalShards
+	}
+	return k, m, nil
 }
 
-// Encode expands ciphertext into shards. redundancy is the ratio of total
-// shards to source symbols (e.g. 3.0 emits ~3x the minimum needed). The input
-// slice is not modified.
-func Encode(ciphertext []byte, redundancy float64) (Params, []Shard, error) {
-	if len(ciphertext) == 0 {
+// Encode splits data into K data shards and M−K parity shards (total M); any K
+// of the M reconstruct it. redundancy is the ratio M/K (e.g. 2.0).
+func Encode(data []byte, redundancy float64) (Params, []Shard, error) {
+	if len(data) == 0 {
 		return Params{}, nil, fmt.Errorf("cannot shard empty input")
 	}
 	if redundancy < 1 {
 		return Params{}, nil, fmt.Errorf("redundancy must be >= 1, got %g", redundancy)
 	}
-
-	k := chooseK(len(ciphertext))
-	m := int(math.Ceil(float64(k) * redundancy))
-	if m < k {
-		m = k
+	k, m, err := chooseShards(len(data), redundancy)
+	if err != nil {
+		return Params{}, nil, err
 	}
-	if m >= maxShards {
-		return Params{}, nil, fmt.Errorf("too many shards (%d); reduce redundancy or input size", m)
+	enc, err := reedsolomon.New(k, m-k)
+	if err != nil {
+		return Params{}, nil, err
 	}
-
-	// EncodeLTBlocks mutates its input, so hand it a copy.
-	msg := make([]byte, len(ciphertext))
-	copy(msg, ciphertext)
-
-	codec := fountain.NewRaptorCodec(k, alignment)
-	ids := make([]int64, m)
-	for i := range ids {
-		ids[i] = int64(i) // 0..K-1 are systematic source symbols, K..M-1 are repair
+	shards, err := enc.Split(data)
+	if err != nil {
+		return Params{}, nil, err
 	}
-
-	blocks := fountain.EncodeLTBlocks(msg, ids, codec)
-	shards := make([]Shard, len(blocks))
-	for i, b := range blocks {
-		shards[i] = Shard{BlockCode: b.BlockCode, Data: b.Data}
+	if err := enc.Encode(shards); err != nil {
+		return Params{}, nil, err
 	}
-
+	out := make([]Shard, len(shards))
+	for i, s := range shards {
+		cp := make([]byte, len(s))
+		copy(cp, s)
+		out[i] = Shard{Index: i, Data: cp}
+	}
 	return Params{
-		Algorithm:     "raptor-r10",
-		SourceSymbols: k,
-		Alignment:     alignment,
-		MessageLen:    len(ciphertext),
-		TotalShards:   m,
-	}, shards, nil
+		Algorithm:   "reed-solomon",
+		DataShards:  k,
+		TotalShards: m,
+		MessageLen:  len(data),
+	}, out, nil
 }
 
-// Decode reconstructs the ciphertext from a subset of shards. It returns an
-// error if too few shards are supplied to recover the message.
-func Decode(p Params, shards []Shard) ([]byte, error) {
-	if len(shards) < p.SourceSymbols {
-		return nil, fmt.Errorf("insufficient shards: have %d, need at least %d", len(shards), p.SourceSymbols)
+// Decode reconstructs the original data from a subset of shards. It needs at
+// least DataShards of them; missing shards are recovered.
+func Decode(p Params, have []Shard) ([]byte, error) {
+	if len(have) < p.DataShards {
+		return nil, fmt.Errorf("insufficient shards: have %d, need at least %d", len(have), p.DataShards)
 	}
-
-	codec := fountain.NewRaptorCodec(p.SourceSymbols, p.Alignment)
-	decoder := codec.NewDecoder(p.MessageLen)
-
-	blocks := make([]fountain.LTBlock, len(shards))
-	for i, s := range shards {
-		blocks[i] = fountain.LTBlock{BlockCode: s.BlockCode, Data: s.Data}
+	enc, err := reedsolomon.New(p.DataShards, p.TotalShards-p.DataShards)
+	if err != nil {
+		return nil, err
 	}
-
-	if !decoder.AddBlocks(blocks) {
-		return nil, fmt.Errorf("insufficient shards to decode: have %d, need ~%d", len(shards), p.SourceSymbols)
+	shards := make([][]byte, p.TotalShards)
+	for _, s := range have {
+		if s.Index >= 0 && s.Index < p.TotalShards {
+			shards[s.Index] = s.Data
+		}
 	}
-	out := decoder.Decode()
-	if out == nil {
-		return nil, fmt.Errorf("decode failed despite sufficient blocks")
+	if err := enc.ReconstructData(shards); err != nil {
+		return nil, fmt.Errorf("reconstruct: %w", err)
 	}
-	return out, nil
+	var buf bytes.Buffer
+	if err := enc.Join(&buf, shards, p.MessageLen); err != nil {
+		return nil, fmt.Errorf("join: %w", err)
+	}
+	return buf.Bytes(), nil
 }
