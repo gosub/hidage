@@ -120,9 +120,22 @@ detection, and the content-addressed store.
 
 ## Roadmap
 
-- **Phase 2 — networking:** go-libp2p host keyed by the Ed25519 identity, Kademlia DHT
-  for shard discovery (provider records), push/pull shard transfer. A libp2p-backed
-  `Store` slots in behind the existing interface.
-- **Phase 3 — reputation/ledger:** proof-of-storage audit challenges, signed receipts,
-  and space accounting for the 2–4× contribution model.
-- **Phase 4 — anonymity routing:** optional Tor / Veilid transport to hide IPs.
+- **Phase 1 — local core.** ✅ Done. The monolithic pipeline above: pack → encrypt →
+  fountain-shard → store, restore from any sufficient subset, signed manifest.
+- **Phase 2 — versioned storage core.** Replace the monolithic blob with **content-defined
+  chunking + a Merkle DAG + signed snapshots**, so updating, changing, or removing files
+  re-stores only the delta (git/restic-style), with history kept. Per-repo deterministic
+  encryption gives content-addressed dedup within your own data without leaking
+  chunk-equality across users.
+- **Phase 3 — networking + trust.** go-libp2p host keyed by the Ed25519 identity,
+  Kademlia DHT for discovery, pack/shard transfer behind the existing `Store` interface;
+  plus a **trust/whitelist policy** letting a node bypass reputation for keys it
+  explicitly trusts (friend-to-friend, à la Syncthing pairing) or block.
+- **Phase 4 — reputation.** Proof-of-storage audit challenges, signed receipts, and
+  space accounting for the 2–4× contribution model.
+- **Phase 5 — anonymity routing.** Optional Tor / Veilid transport to hide IPs.
+
+> A paid storage service is **only an idea, not a planned feature.** The chosen
+> primitives (signed pubkey identities + trust policy, content-addressed verifiable
+> shards, audit-backed reputation) are deliberately enough to make one *possible* later
+> without any market-specific work in scope today.
