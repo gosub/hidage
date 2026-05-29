@@ -72,6 +72,10 @@ hidage forget <id>                # drop a snapshot record …
 hidage prune                      # … then GC objects no snapshot references
 
 hidage recover                    # on a new machine: rebuild the keyring from the phrase
+
+hidage trust add <pubkey>         # trust a peer's key (bypass reputation, friend-to-friend)
+hidage trust block <pubkey>       # block a peer's key (never interact)
+hidage trust list                 # show trusted / blocked keys
 ```
 
 - A tracked folder is one containing `.hidage/`; `snapshot` creates it on first use.
@@ -143,6 +147,7 @@ the distribution phase.
 | `internal/config` | config + data-store path resolution (`HIDAGE_STORE`) |
 | `internal/keyring` | root secret (wrapped under passphrase) → master key + identity; BIP39 recovery code |
 | `internal/identity` | Ed25519 keypair derived from the keyring (future libp2p peer key) |
+| `internal/trust` | peer trust policy: whitelist / blocklist, consulted before reputation |
 | `internal/crypto` | Argon2id KEK, key wrap/unwrap, deterministic content-addressed seal |
 | `internal/store` | `Store` interface; `FSStore` (meta) + `HardlinkStore` (pooled, cross-repo-dedup data) |
 | `internal/chunk` | content-defined chunking (FastCDC) |
@@ -172,12 +177,13 @@ the distribution phase.
   delta, with history and prune/GC.
 - **Phase 3 — networking + trust + recovery.** *In progress.* ✅ **Recovery code** — keys
   derive from one root, exportable as a 24-word phrase (`recovery-code` / `recover`).
-  Remaining: go-libp2p host keyed by the Ed25519 identity, Kademlia DHT for discovery, and
-  shard transfer behind the existing `Store` interface (objects grouped into packs, each
-  fountain-sharded for redundant distribution); a **trust/whitelist policy** (prefer/block
-  specific keys, friend-to-friend); and the rest of **disaster recovery** — distributing
-  snapshots + DAG nodes (not just chunks) and a signed DHT head pointer, so a backup is
-  restorable from just the recovery phrase + a peer (see [`DESIGN.md`](DESIGN.md)).
+  ✅ **Trust/whitelist policy** — `hidage trust add/block/list` (prefer/block specific keys,
+  friend-to-friend), consulted before reputation. Remaining: go-libp2p host keyed by the
+  Ed25519 identity, Kademlia DHT for discovery, and shard transfer behind the existing
+  `Store` interface (objects grouped into packs, each fountain-sharded for redundant
+  distribution); and the rest of **disaster recovery** — distributing snapshots + DAG
+  nodes (not just chunks) and a signed DHT head pointer, so a backup is restorable from
+  just the recovery phrase + a peer (see [`DESIGN.md`](DESIGN.md)).
 - **Phase 4 — reputation.** Proof-of-storage audit challenges, signed receipts, and space
   accounting for the 2–4× contribution model.
 - **Phase 5 — anonymity routing.** Optional Tor / Veilid transport to hide IPs.

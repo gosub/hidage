@@ -189,6 +189,27 @@ cross-repository coordination or registry is needed — the filesystem refcount 
 
 ---
 
+## Trust policy (`internal/trust`)
+
+A node keeps a local policy of peer public keys it has an opinion about, in
+`~/.config/hidage/trust.json` (no secrets — just public keys). When the networking
+layer decides whether to place shards on a peer or accept them from one, it consults the
+policy first:
+
+```
+Blocked  → never interact (overrides everything)
+Trusted  → interact regardless of reputation (friend-to-friend, à la Syncthing pairing)
+Neutral  → defer to the reputation score (Phase 4)
+```
+
+`Verdict(pubkey)` returns one of those three; trusted and blocked are mutually exclusive
+(trusting a key clears any block and vice-versa). Managed via `hidage trust
+add/remove/block/unblock/list`. The decision is a pure function of `(pubkey, policy)` plus
+the future reputation score, so it is fully testable before any networking exists and
+simply becomes load-bearing once peers are real.
+
+---
+
 ## Threat model & guarantees
 
 - **Confidentiality:** all stored objects are encrypted client-side; a host holding them
@@ -214,8 +235,9 @@ cross-repository coordination or registry is needed — the filesystem refcount 
   It buys redundancy across *unreliable peers*, so it is layered on with networking —
   repository objects grouped into ~4–16 MiB packs, each fountain-sharded for distribution
   — rather than wasted on local storage. *(planned, Phase 3)*
-- **Trust / whitelist** — a policy consulted before reputation, letting a node prefer or
-  block specific keys (friend-to-friend). *(planned, Phase 3)*
+- **Trust / whitelist** — ✅ *implemented* (`internal/trust`, see above): prefer or block
+  specific keys before reputation. It becomes load-bearing once the networking layer
+  consults it at placement/acceptance.
 - **Reputation** — proof-of-storage audits, signed receipts, space accounting for the 2–4×
   contribution model. *(planned, Phase 4)*
 - **Anonymity routing** — optional Tor / Veilid transport. *(planned, Phase 5)*
