@@ -217,4 +217,43 @@ cross-repository coordination or registry is needed — the filesystem refcount 
   contribution model. *(planned, Phase 4)*
 - **Anonymity routing** — optional Tor / Veilid transport. *(planned, Phase 5)*
 
+### Disaster recovery — rebuild from the network with no local state *(planned, Phase 3)*
+
+The point of distribution is surviving total loss of the original machine. To restore, you
+walk the DAG from the top, pulling each object from the network by its `cipherID` and
+decrypting it with the master key (`fp` for each object is carried in its parent):
+
+```
+snapshot ──▶ root Ref ──▶ tree nodes ──▶ file nodes ──▶ chunk Refs
+   pull+verify    decrypt      decrypt        decrypt       pull (reassemble from any
+   (signature)                                              K-of-M fountain shards) + decrypt
+```
+
+For this to actually work, three things the current build keeps only locally must change:
+
+1. **Distribute snapshots and DAG nodes, not just chunks.** Today the snapshot roots
+   (`.hidage/snapshots/`) and structure nodes (`.hidage/objects/`) live only in the
+   tracked folder — lost with the originals. They are tiny and must be replicated to the
+   network like any other object, or the chunk data is unusable (no recipe to reassemble
+   it).
+
+2. **Make the master key recoverable.** It is a *random* key stored only in
+   `~/.config/hidage/masterkey.json`; lose that and the passphrase alone recovers nothing.
+   Add an exportable **recovery code** (a BIP39-style mnemonic encoding the master key and
+   the identity seed) to write down/escrow, or derive the master key deterministically from
+   the passphrase (simpler recovery, but the passphrase becomes the key and cannot be
+   rotated without re-encrypting).
+
+3. **Find the latest snapshot with zero local state.** Publish an IPNS-style **signed head
+   pointer** in the DHT keyed by the owner's identity public key (`pubkey → latest snapshot
+   id`, signed by the identity key), refreshed on each snapshot. Recovery then needs only
+   the identity (derivable from the recovery code) to locate the head — no snapshot ID to
+   remember.
+
+**Minimal recovery seed.** With those in place, recovering an arbitrarily large dataset
+needs only a tiny off-machine secret plus a way onto the network: a passphrase-protected
+**recovery code encoding {master key, identity key}**, and at least one **bootstrap peer**.
+From there: identity → DHT head lookup → fetch+verify snapshot → walk the DAG, pulling and
+decrypting nodes and chunks → reassemble.
+
 See the [README roadmap](README.md#roadmap) for phase ordering.

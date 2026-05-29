@@ -160,11 +160,14 @@ the distribution phase.
 - **Phase 2 — versioned storage core.** ✅ Done. The repository: content-defined chunking
   + Merkle DAG + signed snapshots, so updating/changing/removing files re-stores only the
   delta, with history and prune/GC.
-- **Phase 3 — networking + trust.** go-libp2p host keyed by the Ed25519 identity,
-  Kademlia DHT for discovery, and shard transfer behind the existing `Store` interface
-  (objects grouped into packs, each fountain-sharded for redundant distribution); plus a
-  **trust/whitelist policy** letting a node bypass reputation for keys it explicitly
-  trusts (friend-to-friend, à la Syncthing pairing) or block.
+- **Phase 3 — networking + trust + recovery.** go-libp2p host keyed by the Ed25519
+  identity, Kademlia DHT for discovery, and shard transfer behind the existing `Store`
+  interface (objects grouped into packs, each fountain-sharded for redundant
+  distribution); a **trust/whitelist policy** letting a node bypass reputation for keys it
+  explicitly trusts (friend-to-friend, à la Syncthing pairing) or block; and **disaster
+  recovery** — distributing snapshots + DAG nodes (not just chunks), an exportable
+  recovery code for the master key, and a signed DHT head pointer so a backup is
+  restorable from a tiny off-machine seed (see [`DESIGN.md`](DESIGN.md)).
 - **Phase 4 — reputation.** Proof-of-storage audit challenges, signed receipts, and space
   accounting for the 2–4× contribution model.
 - **Phase 5 — anonymity routing.** Optional Tor / Veilid transport to hide IPs.
