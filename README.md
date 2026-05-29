@@ -15,25 +15,38 @@ storage, while a future reputation ledger tracks which hosts are reliable.
 
 ## How it works
 
+Everything is encrypted client-side under a key derived from your passphrase, then kept
+in a content-addressed store (blobs keyed by SHA-256). hidage offers two storage models
+on top of those shared primitives:
+
+**One-shot backup** (`backup`) — freeze a file/folder and spread it redundantly:
+
 ```
-file/folder ──pack──▶ blob ──encrypt──▶ ciphertext ──fountain-shard──▶ shards ──▶ store
-                                                                                      │
-restored file/folder ◀─unpack─ blob ◀─decrypt─ ciphertext ◀──fountain-decode── any N+ of M
+file/folder ─encrypt─▶ ciphertext ─fountain-shard─▶ M shards ─▶ store
+                                                                   │
+       file/folder ◀──── decrypt ◀──── fountain-decode ◀── any K(+ε) of the M shards
 ```
 
-1. **Pack** — a folder becomes a deterministic `tar` stream; a single file passes
-   through unchanged.
-2. **Encrypt** — a random per-backup data key (DEK) seals the blob with
-   ChaCha20-Poly1305 in 64 KiB chunks (with truncation protection). The DEK is wrapped
-   under a key derived from your passphrase via Argon2id. Hosts holding shards learn
-   nothing about the content.
-3. **Shard** — the ciphertext is expanded with an R10 Raptor **fountain code** into
-   `M` shards. Any sufficiently large subset (`K` plus a small coding overhead)
-   reconstructs the blob, in any order — like BitTorrent, but rateless.
-4. **Store** — shards are written to a local content-addressed store keyed by SHA-256.
-5. **Manifest** — a signed JSON "recipe" (`*.hmanifest`) records the crypto and
-   fountain parameters, the wrapped DEK, and the shard list. **Keep this file** — it
-   is what you need to restore. It is signed by your Ed25519 identity.
+The ciphertext is expanded with an R10 Raptor **fountain code** into `M` shards; any
+sufficient subset (`K` plus a little overhead) reconstructs it, in any order — like
+BitTorrent, but rateless. A signed `*.hmanifest` is the recovery recipe.
+
+**Versioned repository** (`repo`) — update/change/remove files efficiently, with history:
+
+```
+files ─FastCDC chunk─▶ chunks ─▶ Merkle DAG (file + tree nodes) ─▶ signed snapshot
+                          └── unchanged chunks keep their hash ⇒ stored once, reused ──┘
+```
+
+Files are split by content (so a mid-file edit only touches nearby chunks), assembled
+into a Merkle DAG, and captured as a signed snapshot chained to its parent. Re-storing an
+unchanged tree writes **nothing**; changing one file stores only its new chunks plus the
+tree nodes on the path to the root. Per-repo deterministic encryption makes identical
+chunks dedup without leaking chunk-equality across users.
+
+> **Want the real internals?** [`DESIGN.md`](DESIGN.md) details the key hierarchy, the
+> chunked + deterministic AEAD schemes, the DAG node formats, snapshot signing/history,
+> and the prune/GC algorithm — plus the threat model and what's deferred to later phases.
 
 ## Build
 
@@ -85,17 +98,9 @@ diff -r sampledir out/sampledir && echo "restored identically"
 
 The one-shot `backup` above re-shards everything when a single file changes. The `repo`
 command instead keeps a **versioned repository** that re-stores only what changed —
-like git/restic:
-
-- **Content-defined chunking (FastCDC):** files are split on content, so editing one
-  file (or inserting bytes mid-file) only changes nearby chunks.
-- **Merkle DAG:** chunks → file nodes → directory (tree) nodes → a root, each
-  content-addressed. An unchanged subtree keeps its hash and is never re-stored.
-- **Signed snapshots:** each version is an Ed25519-signed root chained to its parent,
-  giving a restorable history. Removing a file is just a new snapshot that omits it.
-- **Per-repo deterministic encryption:** the same plaintext chunk always encrypts to the
-  same bytes (key/nonce derived from the repo master key + an HMAC fingerprint), so
-  unchanged chunks dedup — without leaking chunk-equality across users.
+content-defined chunking + a Merkle DAG + signed snapshots, git/restic-style. See
+[`DESIGN.md`](DESIGN.md#model-2--versioned-repository-phase-2) for the mechanism; the
+commands:
 
 ```sh
 hidage init                              # node identity (signs snapshots)
