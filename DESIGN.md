@@ -229,12 +229,40 @@ the same peer ID as the original). It speaks three things:
   signature on put and get and selects the newest.
 
 `publish` gathers a snapshot's object closure (`repo.PublishSet`: snapshot bytes + every
-reachable DAG node + chunk), pushes it to storage peers, and posts the head pointer.
-`net-restore` does the reverse: resolve the head by the owner's public key, then drive the
-**ordinary restore walk over a `netstore`** — a `dag.Getter` that fetches each object via
-DHT discovery + the object protocol (caching locally) and decrypts it with the master key.
-Because restore runs against any `dag.Getter`, the same code restores from local disk or
-from peers.
+reachable DAG node + chunk), **erasure-codes** it (below), spreads the resulting shards
+across trusted peers, and posts a head pointer to the **Release** descriptor. `net-restore`
+resolves the head, fetches the Release, gathers K-of-M shards per pack from whoever still
+has them, rebuilds the objects, and runs the ordinary restore walk against a local cache.
+
+---
+
+## Durability: audits, reputation, accounting, erasure coding
+
+These keep distributed data recoverable and keep peers honest.
+
+- **Proof-of-storage audits** (`/hidage/audit/1.0.0`, `internal/p2p`) — a node that holds
+  the original challenges a peer with an object id + fresh random nonce; the peer must
+  return `SHA-256(nonce || objectBytes)` (only computable with the bytes), signed by its
+  identity. The challenger verifies the proof against its own copy and the signature,
+  producing a verifiable pass/fail **receipt**.
+
+- **Reputation** (`internal/reputation`) — audit outcomes accumulate per peer into a
+  Laplace-smoothed pass rate. The trust policy's *neutral* verdict defers here: a neutral
+  peer is used once it has enough history and a high enough score, and avoided if its
+  history is low-scoring. `publish` filters its target peers through `trust` then
+  reputation.
+
+- **Space accounting** (`internal/accounting`) — a per-peer ledger of bytes stored *for
+  them* vs. *by them*. On accepting a push, a node enforces a contribution ratio: it
+  stores for a peer at most `ratio × what they store for us + a free quota` (defaults 3×,
+  1 GiB). This is the mechanism behind "contribute 2–4× to consume 1×".
+
+- **Erasure-coded redundancy** (`internal/shard`, `internal/pack`) — objects are grouped
+  into ≤8 MiB **packs**; each pack is Reed-Solomon coded (`klauspost/reedsolomon`) into M
+  shards of which **any K reconstruct** it. Shards are spread round-robin across peers, so
+  losing a minority of peers loses < M−K shards per pack and the data still recovers — at
+  a fraction of the cost of M full replicas. *(Reed-Solomon replaced an earlier fountain-
+  code library that silently returned corrupt output at some parameters.)*
 
 ---
 
@@ -261,14 +289,13 @@ from peers.
   before reputation; consulted when accepting pushes.
 - **Disaster recovery** — ✅ *implemented* (see below): recover from the network with only
   the recovery phrase + a bootstrap peer.
-- **Reputation** — proof-of-storage audits, signed receipts, space accounting for the 2–4×
-  contribution model. *(planned, Phase 4)*
-- **Fountain-coded redundancy** — the rateless primitive exists (`internal/shard`, R10
-  Raptor via `google/gofountain`: split data into `K` source symbols, emit `M ≥ K` encoded
-  shards, reconstruct from any `K`-plus-overhead subset). Today objects are distributed
-  directly; grouping them into ~4–16 MiB packs and fountain-sharding each — so data
-  survives the loss of a minority of peers — lands with the reputation phase. *(planned,
-  Phase 4)*
+- **Reputation, audits, accounting** — ✅ *implemented* (`internal/reputation`,
+  `internal/accounting`, audit protocol; see "Durability" above).
+- **Erasure-coded redundancy** — ✅ *implemented* (`internal/shard` Reed-Solomon +
+  `internal/pack`; see "Durability" above).
+- **Automatic peer selection / storage market** — *not built.* You name storage peers
+  explicitly (filtered by trust + reputation); discovering who offers storage is a
+  marketplace concern, deliberately out of scope.
 - **Anonymity routing** — optional Tor / Veilid transport. *(planned, Phase 5)*
 
 ### Disaster recovery — rebuild from the network with no local state

@@ -1,18 +1,20 @@
 # hidage — hidden storage
 
 `hidage` is a peer-to-peer, pseudonymous, distributed backup system. The goal: back up a
-file or folder by spreading **encrypted, fountain-coded shards** across a P2P network
+file or folder by spreading **encrypted, erasure-coded shards** across a P2P network
 instead of a central server. Each node contributes more local disk than it consumes
 remotely (e.g. 2–4×), trading abundant local space for durable remote storage, while a
 reputation ledger tracks which hosts are reliable.
 
-> **Status: networked.** The encrypted **versioned storage core** (content-addressed
-> repository with incremental snapshots, history, diff, prune) now distributes over a
-> **libp2p P2P network**: nodes discover objects via a Kademlia DHT, replicate a
-> snapshot's objects to trusted peers, and publish a signed head pointer — so a backup is
-> recoverable on a fresh machine from just the **recovery phrase + one bootstrap peer**.
-> Still to come (Phase 4+): a reputation ledger, fountain-coded redundancy for
-> distribution, and IP-level anonymity (see [Roadmap](#roadmap)).
+> **Status: networked + redundant.** The encrypted **versioned storage core**
+> (content-addressed repository with incremental snapshots, history, diff, prune)
+> distributes over a **libp2p P2P network**: nodes discover objects via a Kademlia DHT;
+> a snapshot is **erasure-coded** and its shards spread across trusted peers (any K of M
+> reconstruct, so it survives losing a minority); peers are kept honest by **proof-of-
+> storage audits** feeding a **reputation** score, and a **space-accounting** ledger
+> enforces the contribute-more-than-you-consume model. A backup is recoverable on a fresh
+> machine from just the **recovery phrase + one bootstrap peer**. Still to come: IP-level
+> anonymity (see [Roadmap](#roadmap)).
 
 ## How it works
 
@@ -78,13 +80,18 @@ hidage trust add <pubkey>         # trust a peer's key (bypass reputation, frien
 hidage trust block <pubkey>       # block a peer's key (never interact)
 hidage trust list                 # show trusted / blocked keys
 
-# networking (Phase 3)
+# networking
 hidage serve --listen /ip4/0.0.0.0/tcp/4001   # run a node: join the DHT, serve objects,
-                                              #   accept pushes from non-blocked peers
-hidage publish --peer <addr> --bootstrap <addr>   # push the latest snapshot's objects to
-                                                  #   storage peers + publish a signed head pointer
-hidage net-restore ./out --bootstrap <addr>   # recover from the network: resolve your head,
-                                              #   pull the snapshot + objects, restore
+                                              #   accept pushes within trust + space budget
+hidage publish --peer <addr> --redundancy 3   # erasure-code the latest snapshot, spread
+                                              #   shards across peers, publish a signed head
+hidage net-restore ./out --bootstrap <addr>   # recover from the network: resolve head,
+                                              #   gather K-of-M shards, rebuild, restore
+
+# reputation, audits, accounting
+hidage audit --peer <addr>        # challenge peers to prove they hold your shards
+hidage reputation                 # per-peer audit pass/fail scores
+hidage accounting                 # bytes you store for peers vs. they store for you
 ```
 
 - A tracked folder is one containing `.hidage/`; `snapshot` creates it on first use.
@@ -146,35 +153,38 @@ keyring (deterministic derivation, wrong-pass, recovery-code roundtrip), and the
 repository end to end — snapshot/restore,
 `.hidage` exclusion, incremental-delta accounting, history/diff, `--replace`, and
 forget + prune. Networking: two-node object transfer, DHT provide/discover, push gated by
-trust, signed head publish/resolve, and a full **cross-node recovery** integration test
-(owner publishes to a storage peer, leaves, a fresh node restores everything from the
-network). The `shard` (fountain-coding) package is tested standalone, reserved for
-redundant distribution.
+trust, signed head publish/resolve, proof-of-storage audits, reputation scoring, space
+accounting, Reed-Solomon encode/decode (incl. decode from any K subset), pack
+build/reassemble below and above the shard threshold, a **cross-node recovery** test, and
+the **redundant-recovery** test (shards spread over 3 peers, one killed, full byte-
+identical recovery from the survivors).
 
 ## Project layout
 
 | Path | Responsibility |
 |---|---|
-| `cmd/hidage` | CLI: `init`, `snapshot`, `snapshots`, `restore`, `diff`, `forget`, `prune`, `recovery-code`, `recover` |
+| `cmd/hidage` | CLI: snapshot/restore/diff/prune, recovery-code/recover, trust, serve/publish/net-restore, audit/reputation/accounting |
 | `internal/config` | config + data-store path resolution (`HIDAGE_STORE`) |
 | `internal/keyring` | root secret (wrapped under passphrase) → master key + identity; BIP39 recovery code |
-| `internal/identity` | Ed25519 keypair derived from the keyring (future libp2p peer key) |
+| `internal/identity` | Ed25519 keypair derived from the keyring (libp2p peer key) |
 | `internal/trust` | peer trust policy: whitelist / blocklist, consulted before reputation |
+| `internal/reputation` | per-peer audit pass/fail → Laplace-smoothed score |
+| `internal/accounting` | per-peer space ledger + contribution-ratio enforcement |
 | `internal/crypto` | Argon2id KEK, key wrap/unwrap, deterministic content-addressed seal |
-| `internal/store` | `Store` interface; `FSStore` (meta) + `HardlinkStore` (pooled, cross-repo-dedup data) |
+| `internal/store` | `Store`; `FSStore` (meta) + `HardlinkStore` (pooled, cross-repo dedup) + `KeyedStore` |
 | `internal/chunk` | content-defined chunking (FastCDC) |
 | `internal/dag` | Merkle DAG: chunk/file/tree nodes (meta store) routed apart from chunk data |
-| `internal/repo` | versioned repository: `.hidage` layout, snapshots, restore, diff, prune |
-| `internal/p2p` | libp2p host (peer key = identity), object/push protocols, Kademlia DHT, signed head pointers |
+| `internal/repo` | versioned repository: `.hidage` layout, snapshots, restore, diff, prune, publish-set |
+| `internal/shard` | Reed-Solomon erasure coding (`klauspost/reedsolomon`): any K of M shards reconstruct |
+| `internal/pack` | group objects into packs, erasure-code them, Release descriptor for reassembly |
+| `internal/p2p` | libp2p host (peer key = identity); object/push/audit protocols, Kademlia DHT, signed head pointers |
 | `internal/netstore` | network-backed object source (DHT discover + fetch) for restoring from peers |
-| `internal/shard` | fountain encode/decode (`google/gofountain`); reserved for redundant distribution |
 
 ## Known limitations
 
-- **No automatic replication/redundancy yet** — `publish` pushes to the storage peers you
-  name, and data is fetched from whoever has it; choosing peers automatically and
-  fountain-coded redundancy (surviving the loss of a minority of peers) come with the
-  reputation phase.
+- **Manual peer selection** — you still name storage peers with `--peer` (filtered by
+  trust + reputation); automatic discovery of who's offering storage isn't built (a
+  storage-offer/marketplace layer, which remains out of scope — see the roadmap note).
 - **Pseudonymous, not IP-anonymous** — peers are identified by public key; IP-level
   anonymity is a later phase.
 - **Single-writer** — snapshots assume one owner per repository; concurrent writers from
@@ -187,7 +197,7 @@ redundant distribution.
 ## Roadmap
 
 - **Phase 1 — local crypto/coding core.** ✅ Done. Client-side encryption, the
-  content-addressed store, and the fountain-coding primitive (`internal/shard`).
+  content-addressed store, and the erasure-coding primitive (`internal/shard`).
 - **Phase 2 — versioned storage core.** ✅ Done. The repository: content-defined chunking
   + Merkle DAG + signed snapshots, so updating/changing/removing files re-stores only the
   delta, with history and prune/GC.
@@ -196,11 +206,12 @@ redundant distribution.
   Ed25519 identity with object + push protocols and a **Kademlia DHT**; `publish`
   replicates a snapshot's objects (bytes, DAG nodes, chunks) to trusted peers and posts a
   **signed head pointer**; `net-restore` rebuilds a backup from the network with only the
-  recovery phrase + a bootstrap peer. (Objects are distributed directly; fountain-coded
-  *redundancy* across many peers is folded in with the reputation phase.)
-- **Phase 4 — reputation + redundancy.** Proof-of-storage audit challenges, signed
-  receipts, space accounting for the 2–4× model; objects grouped into packs and
-  fountain-sharded (`internal/shard`) so data survives the loss of any minority of peers.
+  recovery phrase + a bootstrap peer.
+- **Phase 4 — reputation + redundancy.** ✅ Done. Proof-of-storage **audits** (challenge a
+  peer to prove it still holds a shard, signed receipt) feed a per-peer **reputation**
+  score; a **space-accounting** ledger enforces the 2–4× contribution ratio on accepted
+  pushes; and a snapshot is **erasure-coded** (`internal/pack` + Reed-Solomon) into shards
+  spread across peers, so it survives the loss of any minority of them.
 - **Phase 5 — anonymity routing.** Optional Tor / Veilid transport to hide IPs.
 
 > A paid storage service is **only an idea, not a planned feature.** The chosen
