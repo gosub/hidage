@@ -27,6 +27,8 @@ func main() {
 		newDiffCmd(),
 		newForgetCmd(),
 		newPruneCmd(),
+		newRecoveryCodeCmd(),
+		newRecoverCmd(),
 	)
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

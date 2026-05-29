@@ -2,7 +2,7 @@
 // folder containing a .hidage/ directory (like .git): it holds the repo marker,
 // the small Merkle-DAG structure nodes, and the signed snapshots. The bulk chunk
 // data lives in a separate node-wide store outside the folder, and the
-// encryption master key is user-level (see internal/userkey), so the same chunk
+// encryption master key is user-level (see internal/keyring), so the same chunk
 // deduplicates across every folder you back up. Taking a snapshot stores only
 // the objects not already present; old snapshots stay restorable until pruned.
 package repo

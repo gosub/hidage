@@ -22,14 +22,11 @@ func newSnapshotCmd() *cobra.Command {
 				target = args[0]
 			}
 
-			id, err := loadIdentity()
+			kr, err := unlock()
 			if err != nil {
 				return err
 			}
-			mk, err := unlockMasterKey()
-			if err != nil {
-				return err
-			}
+			mk := kr.MasterKey()
 			dataDir := config.DataStoreDir()
 
 			// Use an existing repository found at/above target, else create one
@@ -46,7 +43,7 @@ func newSnapshotCmd() *cobra.Command {
 				fmt.Printf("Created repository in %s/.hidage\n", target)
 			}
 
-			snap, stats, err := r.Snapshot(id.Private, replace)
+			snap, stats, err := r.Snapshot(kr.Identity().Private, replace)
 			if err != nil {
 				return err
 			}

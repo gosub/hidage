@@ -8,9 +8,8 @@ import (
 	"golang.org/x/term"
 
 	"hidage/internal/config"
-	"hidage/internal/identity"
+	"hidage/internal/keyring"
 	"hidage/internal/repo"
-	"hidage/internal/userkey"
 )
 
 // passphraseEnv lets automation (and tests) bypass the interactive prompt.
@@ -61,45 +60,33 @@ func readPassphrase(confirm bool) (string, error) {
 	return string(first), nil
 }
 
-// loadIdentity returns the node identity, requiring `hidage init` to have run.
-func loadIdentity() (identity.Identity, error) {
-	paths, err := config.Resolve()
-	if err != nil {
-		return identity.Identity{}, err
-	}
-	if !identity.Exists(paths.IdentityPath) {
-		return identity.Identity{}, fmt.Errorf("no identity found; run `hidage init` first")
-	}
-	return identity.Load(paths.IdentityPath)
-}
-
-// unlockMasterKey prompts for the passphrase and unwraps the user-level master
-// key. It requires `hidage init` to have been run.
-func unlockMasterKey() ([]byte, error) {
+// unlock loads and unlocks the user keyring, prompting for the passphrase. It
+// requires `hidage init` (or `hidage recover`) to have run.
+func unlock() (*keyring.Keyring, error) {
 	paths, err := config.Resolve()
 	if err != nil {
 		return nil, err
 	}
-	if !userkey.Exists(paths.MasterKeyPath) {
-		return nil, fmt.Errorf("no encryption key found; run `hidage init` first")
+	if !keyring.Exists(paths.KeyringPath) {
+		return nil, fmt.Errorf("no keyring found; run `hidage init` (or `hidage recover`) first")
 	}
 	pass, err := readPassphrase(false)
 	if err != nil {
 		return nil, err
 	}
-	return userkey.Load(paths.MasterKeyPath, pass)
+	return keyring.Load(paths.KeyringPath, pass)
 }
 
-// discoverRepo unlocks the master key and opens the repository found by walking
-// up from the start directory.
+// discoverRepo unlocks the keyring and opens the repository found by walking up
+// from the start directory.
 func discoverRepo() (*repo.Repo, error) {
 	folder := repo.Find(startDir())
 	if folder == "" {
 		return nil, fmt.Errorf("not inside a hidage repository (run `hidage snapshot` to create one)")
 	}
-	mk, err := unlockMasterKey()
+	kr, err := unlock()
 	if err != nil {
 		return nil, err
 	}
-	return repo.Open(folder, mk, config.DataStoreDir())
+	return repo.Open(folder, kr.MasterKey(), config.DataStoreDir())
 }

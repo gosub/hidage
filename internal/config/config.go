@@ -25,10 +25,8 @@ const DataStoreEnv = "HIDAGE_STORE"
 type Paths struct {
 	// Dir is the root config directory (e.g. ~/.config/hidage).
 	Dir string
-	// IdentityPath is where the Ed25519 private key is stored.
-	IdentityPath string
-	// MasterKeyPath is where the wrapped user-level encryption key is stored.
-	MasterKeyPath string
+	// KeyringPath is where the wrapped root secret (master key + identity) lives.
+	KeyringPath string
 }
 
 // DataStoreDir returns the node-wide chunk store path: $HIDAGE_STORE if set,
@@ -52,9 +50,8 @@ func Resolve() (Paths, error) {
 	}
 	dir := filepath.Join(base, AppName)
 	return Paths{
-		Dir:           dir,
-		IdentityPath:  filepath.Join(dir, "identity.key"),
-		MasterKeyPath: filepath.Join(dir, "masterkey.json"),
+		Dir:         dir,
+		KeyringPath: filepath.Join(dir, "keyring.json"),
 	}, nil
 }
 
