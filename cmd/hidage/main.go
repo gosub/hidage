@@ -13,17 +13,20 @@ import (
 func main() {
 	root := &cobra.Command{
 		Use:           "hidage",
-		Short:         "hidage — encrypted, fountain-sharded distributed backup (local MVP)",
+		Short:         "hidage — encrypted, versioned, distributed backup",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
+	root.PersistentFlags().StringVar(&repoFlag, "repo", "",
+		"repository directory (default: ~/.config/hidage/repo)")
 	root.AddCommand(
 		newInitCmd(),
-		newBackupCmd(),
+		newSnapshotCmd(),
+		newSnapshotsCmd(),
 		newRestoreCmd(),
-		newInfoCmd(),
-		newVerifyCmd(),
-		newRepoCmd(),
+		newDiffCmd(),
+		newForgetCmd(),
+		newPruneCmd(),
 	)
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

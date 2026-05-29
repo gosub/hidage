@@ -1,5 +1,5 @@
 // Package config resolves the on-disk locations hidage uses for its identity
-// key and local shard store. Paths follow the XDG Base Directory spec, falling
+// key and default repository. Paths follow the XDG Base Directory spec, falling
 // back to ~/.config/hidage when XDG_CONFIG_HOME is unset.
 package config
 
@@ -18,8 +18,8 @@ type Paths struct {
 	Dir string
 	// IdentityPath is where the Ed25519 private key is stored.
 	IdentityPath string
-	// StoreDir is the root of the content-addressed shard store.
-	StoreDir string
+	// DefaultRepoDir is the repository used when --repo is not given.
+	DefaultRepoDir string
 }
 
 // Resolve computes the paths without creating anything on disk.
@@ -34,20 +34,20 @@ func Resolve() (Paths, error) {
 	}
 	dir := filepath.Join(base, AppName)
 	return Paths{
-		Dir:          dir,
-		IdentityPath: filepath.Join(dir, "identity.key"),
-		StoreDir:     filepath.Join(dir, "store"),
+		Dir:            dir,
+		IdentityPath:   filepath.Join(dir, "identity.key"),
+		DefaultRepoDir: filepath.Join(dir, "repo"),
 	}, nil
 }
 
-// Ensure resolves the paths and creates the config and store directories.
+// Ensure resolves the paths and creates the config directory.
 func Ensure() (Paths, error) {
 	p, err := Resolve()
 	if err != nil {
 		return Paths{}, err
 	}
-	if err := os.MkdirAll(p.StoreDir, 0o700); err != nil {
-		return Paths{}, fmt.Errorf("create store dir: %w", err)
+	if err := os.MkdirAll(p.Dir, 0o700); err != nil {
+		return Paths{}, fmt.Errorf("create config dir: %w", err)
 	}
 	return p, nil
 }
