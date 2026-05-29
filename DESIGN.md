@@ -4,14 +4,9 @@ This document is the technical reference for how hidage stores data. For a quick
 conceptual overview and CLI usage, see the [README](README.md). Sections marked
 *(planned)* are not implemented yet.
 
-hidage has two storage models that share the same primitives (identity, crypto,
-content-addressed store):
-
-- **One-shot backup** (Phase 1) — encrypt + fountain-shard a file/folder into a static,
-  signed manifest. Good for "freeze this and spread it redundantly."
-- **Versioned repository** (Phase 2) — content-defined chunking + a Merkle DAG + signed
-  snapshots, so updates re-store only the delta and history is kept. This is the model
-  that supports change/update/remove.
+hidage stores data as a **versioned repository**: encrypted, content-addressed objects
+plus a chain of signed snapshots. Content-defined chunking and a Merkle DAG mean an
+update re-stores only what changed; history is kept and old versions stay restorable.
 
 ---
 
@@ -19,16 +14,15 @@ content-addressed store):
 
 ### Identity (`internal/identity`)
 A node has an Ed25519 keypair. The public key is its pseudonymous identity (and the
-future libp2p peer key); the private key signs manifests and snapshots. The seed is
-stored base64-encoded at `~/.config/hidage/identity.key` (mode 0600).
+future libp2p peer key); the private key signs snapshots. The seed is stored
+base64-encoded at `~/.config/hidage/identity.key` (mode 0600).
 
 ### Key hierarchy (`internal/crypto`)
 - **KEK** — derived from the user's passphrase with **Argon2id** (defaults: time=3,
   memory=64 MiB, threads=4, 32-byte output, 16-byte random salt).
-- **Data key** — a random 256-bit key (a per-backup DEK in Phase 1, a per-repository
-  master key in Phase 2) is wrapped under the KEK with ChaCha20-Poly1305 (`nonce ||
-  ciphertext`). Only the wrapped form is ever written to disk. A wrong passphrase fails
-  the AEAD tag, which is how unlock errors are detected.
+- **Master key** — each repository has a random 256-bit master key, wrapped under the KEK
+  with ChaCha20-Poly1305 (`nonce || ciphertext`). Only the wrapped form is written to
+  disk. A wrong passphrase fails the AEAD tag, which is how unlock errors surface.
 
 ### Content-addressed store (`internal/store`)
 A `Store` is a blob map keyed by the hex SHA-256 of its contents. The local `FSStore`
@@ -39,44 +33,9 @@ Phase 3.
 
 ---
 
-## Model 1 — One-shot backup (Phase 1)
+## The repository (`internal/repo`)
 
-```
-file/folder ─pack─▶ blob ─encrypt─▶ ciphertext ─fountain─▶ shards ─▶ store
-                                                                       │
-   file/folder ◀─unpack─ blob ◀─decrypt─ ciphertext ◀─decode─ any K(+ε) of M
-```
-
-1. **Pack** (`internal/archive`) — a folder becomes a deterministic `tar` stream
-   (entries name-sorted, timestamps zeroed); a single file passes through unchanged.
-2. **Encrypt** (`internal/crypto`) — the blob is sealed with a random DEK using a
-   **chunked AEAD**: ChaCha20-Poly1305 over 64 KiB plaintext chunks, where the per-chunk
-   nonce is an 8-byte big-endian counter with its final byte set to `1` on the last
-   chunk. The final-chunk flag gives **truncation protection** — a stream missing its
-   tail presents no flagged chunk and fails to open.
-3. **Shard** (`internal/shard`) — the ciphertext is expanded with the **R10 Raptor**
-   fountain code (`google/gofountain`). It is split into `K = clamp(ceil(len / 64 KiB),
-   4, 8192)` source symbols (alignment 4) and emitted as `M = ceil(K × redundancy)`
-   encoded symbols. The code is systematic (IDs `0..K-1` reproduce the source symbols;
-   `K..M-1` are repair). `BlockCode` passes through `uint16`, so `M < 65536`. Decoding
-   needs any `K` symbols plus a small coding overhead — order-independent.
-4. **Manifest** (`internal/manifest`) — a signed JSON recipe records everything needed
-   to restore: crypto params + wrapped DEK, fountain params (`K`, `M`, alignment,
-   ciphertext length), and the shard list (`{id, blockCode, size}`). It is Ed25519-signed
-   over its canonical serialization (all fields except `signature`). **Keep this file** —
-   it is the recovery recipe.
-
-Restore reverses the pipeline and verifies the recovered plaintext against the
-manifest's SHA-256.
-
-**Trade-off:** the whole folder is one blob, so changing one byte re-encrypts and
-re-shards everything. Model 2 exists to fix that.
-
----
-
-## Model 2 — Versioned repository (Phase 2)
-
-A **repository** (`internal/repo`) is a directory:
+A repository is a directory:
 
 ```
 <repo>/
@@ -85,15 +44,17 @@ A **repository** (`internal/repo`) is a directory:
   snapshots/<id>.json  # one signed snapshot root per version
 ```
 
-`repo init` generates a random per-repo **master key**, wraps it under the passphrase
-KEK, and writes the config. `repo open` re-derives the KEK and unwraps the master key.
+`Init` generates a random per-repo master key, wraps it under the passphrase KEK, and
+writes the config. `Open` re-derives the KEK and unwraps the master key. The CLI uses a
+default repository at `~/.config/hidage/repo` (override with `--repo`), auto-created on
+the first `snapshot`.
 
 ### Content-defined chunking (`internal/chunk`)
 Files are split with **FastCDC** (`github.com/jotfs/fastcdc-go`, average 1 MiB, min 256
 KiB, max 4 MiB, seed 0). Because boundaries are chosen from a rolling hash of the
 *content*, inserting or removing bytes in the middle of a file only disturbs the chunks
 around the edit — the rest realign and keep their identities. This is what makes
-incremental snapshots cheap. (The same input always chunks identically.)
+incremental snapshots cheap. The same input always chunks identically.
 
 ### The Merkle DAG (`internal/dag`)
 Every object is content-addressed and referenced by a **`Ref`**:
@@ -114,10 +75,10 @@ FileNode  { type:"file", mode, size, chunks: [Ref, …] }          ordered chunk
 TreeNode  { type:"tree", entries: [{name, kind, mode, ref}, …] } name-sorted dir
 ```
 
-A directory's `TreeNode` references child trees and files by `Ref`; a snapshot
-references a single root `TreeNode`. Because a `Ref` is determined by content, an
-unchanged file or subtree has the **same `Ref` across snapshots** and is never
-re-stored — exactly git's blob/tree model:
+A directory's `TreeNode` references child trees and files by `Ref`; a snapshot references
+a single root `TreeNode`. Because a `Ref` is determined by content, an unchanged file or
+subtree has the **same `Ref` across snapshots** and is never re-stored — exactly git's
+blob/tree model:
 
 ```
 snapshot.root ─▶ TreeNode(project)
@@ -148,7 +109,7 @@ plaintext hash would let anyone who *guesses* a chunk confirm its presence (a co
 encryption confirmation attack). Keying the fingerprint with the per-repo secret means
 dedup works **within the owner's own data** but leaks no chunk-equality across users.
 
-### Snapshots & history (`internal/repo`)
+### Snapshots & history
 A snapshot is a signed root:
 
 ```
@@ -157,17 +118,18 @@ Snapshot { version, id, createdAt, parent, source, root: Ref, ownerPubKey, signa
 
 - `signature` — Ed25519 over the canonical payload (all fields except `id` and
   `signature`).
-- `id` — hex SHA-256 of that same payload (content-addressed; any prefix that is
-  unambiguous resolves it on the CLI).
+- `id` — hex SHA-256 of that same payload (content-addressed; any unambiguous prefix
+  resolves it on the CLI).
 - `parent` — the previous snapshot's `id`, forming a git-like chain. **Update** = a new
-  snapshot sharing all unchanged refs; **remove a file** = a new snapshot whose tree
-  omits it. Old snapshots stay valid and restorable.
+  snapshot sharing all unchanged refs; **remove a file** = a new snapshot whose tree omits
+  it. Old snapshots stay valid and restorable.
 
 `buildRoot` wraps the source under a single top-level entry named after it, so both files
-and directories restore under their original name.
+and directories restore under their original name. `Snapshot` also reports how many new
+objects it wrote (the delta) versus the repository total.
 
-Restore streams each file chunk-by-chunk to disk (memory stays bounded regardless of
-file size) and rejects path-traversal entry names.
+Restore streams each file chunk-by-chunk to disk (memory stays bounded regardless of file
+size) and rejects path-traversal entry names.
 
 ### Diff (`Loader.Diff`)
 Comparing two snapshots walks their trees, **skipping any subtree whose `Ref` is equal**,
@@ -184,31 +146,33 @@ are retained, so pruning one version never harms another.
 
 ## Threat model & guarantees
 
-- **Confidentiality:** all stored objects are encrypted client-side; a host holding
-  shards/objects sees only ciphertext. Metadata (file names, sizes, tree structure)
-  lives inside encrypted DAG nodes.
-- **Integrity:** content addressing (SHA-256) detects corruption of any object; AEAD
-  tags detect tampering; the Merkle root binds the whole tree; manifests and snapshots
-  are Ed25519-signed by the owner.
+- **Confidentiality:** all stored objects are encrypted client-side; a host holding them
+  sees only ciphertext. Metadata (file names, sizes, tree structure) lives inside
+  encrypted DAG nodes.
+- **Integrity:** content addressing (SHA-256) detects object corruption; AEAD tags detect
+  tampering; the Merkle root binds the whole tree; snapshots are Ed25519-signed by the
+  owner.
 - **Anonymity:** *pseudonymous only* — peers are identified by public key. IP-level
   anonymity is a later phase.
-- **Not yet covered:** at-rest forward secrecy (a leaked master key decrypts all
-  snapshots in that repo); multi-writer concurrency (snapshots assume a single owner).
+- **Not yet covered:** at-rest forward secrecy (a leaked master key decrypts all snapshots
+  in that repository); multi-writer concurrency (snapshots assume a single owner).
 
 ---
 
 ## What's deliberately deferred
 
-- **Fountain re-sharding of repository objects** — Model 2 stores encrypted chunks
-  directly. Fountain coding buys redundancy across *unreliable peers*, so it is layered
-  on in the networking phase (objects grouped into ~4–16 MiB packs, each fountain-sharded
-  for distribution) rather than wasted on local storage. *(planned, Phase 3)*
-- **Networking** — go-libp2p host, Kademlia DHT discovery, pack/shard transfer behind the
+- **Networking** — go-libp2p host, Kademlia DHT discovery, and object transfer behind the
   `Store` interface. *(planned, Phase 3)*
+- **Fountain-coded distribution** — the rateless coding primitive already exists
+  (`internal/shard`, R10 Raptor via `google/gofountain`: split data into `K` source
+  symbols, emit `M ≥ K` encoded shards, reconstruct from any `K`-plus-overhead subset).
+  It buys redundancy across *unreliable peers*, so it is layered on with networking —
+  repository objects grouped into ~4–16 MiB packs, each fountain-sharded for distribution
+  — rather than wasted on local storage. *(planned, Phase 3)*
 - **Trust / whitelist** — a policy consulted before reputation, letting a node prefer or
   block specific keys (friend-to-friend). *(planned, Phase 3)*
-- **Reputation** — proof-of-storage audits, signed receipts, space accounting for the
-  2–4× contribution model. *(planned, Phase 4)*
+- **Reputation** — proof-of-storage audits, signed receipts, space accounting for the 2–4×
+  contribution model. *(planned, Phase 4)*
 - **Anonymity routing** — optional Tor / Veilid transport. *(planned, Phase 5)*
 
 See the [README roadmap](README.md#roadmap) for phase ordering.

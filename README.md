@@ -1,52 +1,46 @@
 # hidage — hidden storage
 
-`hidage` is a peer-to-peer, pseudonymous, distributed backup system. The goal: back
-up a file or folder by spreading **encrypted, fountain-coded shards** across a P2P
-network instead of a central server. Each node contributes more local disk than it
-consumes remotely (e.g. 2–4×), trading abundant local space for durable remote
-storage, while a future reputation ledger tracks which hosts are reliable.
+`hidage` is a peer-to-peer, pseudonymous, distributed backup system. The goal: back up a
+file or folder by spreading **encrypted, fountain-coded shards** across a P2P network
+instead of a central server. Each node contributes more local disk than it consumes
+remotely (e.g. 2–4×), trading abundant local space for durable remote storage, while a
+reputation ledger tracks which hosts are reliable.
 
-> **Status: local, no networking yet.** Two storage models are implemented locally:
-> the **Phase 1 one-shot** pipeline (`backup`/`restore`, below) and the **Phase 2
-> versioned repository** (`repo`, [below](#versioned-storage-repo-phase-2)) with
-> incremental snapshots, history, and pruning. Networking, the reputation ledger, and
-> anonymity are later phases (see [Roadmap](#roadmap)); the code is structured behind
-> interfaces so they drop in without rework.
+> **Status: local, no networking yet.** What works today is the encrypted, **versioned
+> storage core**: a content-addressed repository with incremental snapshots, history,
+> diff, and pruning (git/restic-style). Distributing shards over a P2P network — where
+> the fountain coding and reputation ledger come in — is the next phase (see
+> [Roadmap](#roadmap)). The code is structured behind interfaces (notably `Store`) so
+> those layers drop in without rework.
 
 ## How it works
 
-Everything is encrypted client-side under a key derived from your passphrase, then kept
-in a content-addressed store (blobs keyed by SHA-256). hidage offers two storage models
-on top of those shared primitives:
-
-**One-shot backup** (`backup`) — freeze a file/folder and spread it redundantly:
+A **repository** holds your data as encrypted, content-addressed objects plus a chain of
+signed **snapshots**. Taking a snapshot stores only what changed since the last one:
 
 ```
-file/folder ─encrypt─▶ ciphertext ─fountain-shard─▶ M shards ─▶ store
-                                                                   │
-       file/folder ◀──── decrypt ◀──── fountain-decode ◀── any K(+ε) of the M shards
+files ─FastCDC chunk─▶ chunks ─encrypt─▶ Merkle DAG (file + tree nodes) ─▶ signed snapshot
+                          └── an unchanged chunk keeps its hash ⇒ stored once, reused ──┘
 ```
 
-The ciphertext is expanded with an R10 Raptor **fountain code** into `M` shards; any
-sufficient subset (`K` plus a little overhead) reconstructs it, in any order — like
-BitTorrent, but rateless. A signed `*.hmanifest` is the recovery recipe.
-
-**Versioned repository** (`repo`) — update/change/remove files efficiently, with history:
-
-```
-files ─FastCDC chunk─▶ chunks ─▶ Merkle DAG (file + tree nodes) ─▶ signed snapshot
-                          └── unchanged chunks keep their hash ⇒ stored once, reused ──┘
-```
-
-Files are split by content (so a mid-file edit only touches nearby chunks), assembled
-into a Merkle DAG, and captured as a signed snapshot chained to its parent. Re-storing an
-unchanged tree writes **nothing**; changing one file stores only its new chunks plus the
-tree nodes on the path to the root. Per-repo deterministic encryption makes identical
-chunks dedup without leaking chunk-equality across users.
+1. **Chunk** — files are split with content-defined chunking (FastCDC), so editing or
+   inserting bytes mid-file only changes nearby chunks; the rest keep their identity.
+2. **Encrypt** — each chunk (and DAG node) is sealed with ChaCha20-Poly1305 under a
+   per-repository master key, which is itself wrapped by an Argon2id key derived from
+   your passphrase. Encryption is *deterministic* (key/nonce derived from the content
+   under the master key), so identical chunks encrypt identically and dedup — without
+   leaking chunk-equality across users.
+3. **Build the Merkle DAG** — chunks → file nodes → directory (tree) nodes → a root, each
+   content-addressed. An unchanged file or subtree keeps the same reference and is never
+   re-stored.
+4. **Snapshot** — an Ed25519-signed root chained to its parent. Re-snapshotting an
+   unchanged tree stores **nothing**; changing one file stores only its new chunks plus
+   the tree nodes on the path to the root. Removing a file is just a new snapshot that
+   omits it; old snapshots stay restorable until you forget and prune them.
 
 > **Want the real internals?** [`DESIGN.md`](DESIGN.md) details the key hierarchy, the
-> chunked + deterministic AEAD schemes, the DAG node formats, snapshot signing/history,
-> and the prune/GC algorithm — plus the threat model and what's deferred to later phases.
+> deterministic AEAD scheme, the DAG node formats, snapshot signing/history, and the
+> prune/GC algorithm — plus the threat model and what's deferred to later phases.
 
 ## Build
 
@@ -57,67 +51,49 @@ go build -o hidage ./cmd/hidage
 ## Usage
 
 ```sh
-# One-time: create config dir (~/.config/hidage) and a node identity
-hidage init
+hidage init                       # one-time: create a node identity (signs snapshots)
 
-# Back up a folder with 3x redundancy; writes ./sampledir.hmanifest
-hidage backup ./sampledir --redundancy 3
-
-# Inspect a manifest and local shard availability
-hidage info sampledir.hmanifest
-
-# Check shard integrity / whether a restore is still possible
-hidage verify sampledir.hmanifest
-
-# Restore into ./out (recreates ./out/sampledir)
-hidage restore sampledir.hmanifest ./out
+hidage snapshot ./project         # snapshot a file/folder (creates the repo on first use)
+hidage snapshots                  # list history, oldest first
+hidage diff <idA> <idB>           # paths added / removed / modified between snapshots
+hidage restore <id> ./out         # materialize a version into ./out
+hidage forget <id>                # drop a snapshot record …
+hidage prune                      # … then GC objects no snapshot references
 ```
 
-The passphrase is read interactively. For scripting/tests, set `HIDAGE_PASSPHRASE`.
+- Snapshots live in a **default repository** at `~/.config/hidage/repo`. Use a different
+  one with `--repo <dir>` on any command; it is created automatically on first
+  `snapshot`.
+- Snapshot IDs may be given as any unambiguous **prefix**.
+- The passphrase is read interactively; for scripting/tests set `HIDAGE_PASSPHRASE`.
 
 ## End-to-end demo
 
-This is the rateless property in action — drop a chunk of the shards and still recover:
+Incremental snapshots in action — a one-byte change re-stores almost nothing:
 
 ```sh
 go build -o hidage ./cmd/hidage
 export HIDAGE_PASSPHRASE='correct horse battery staple'
 
 hidage init
-mkdir -p sampledir/sub && echo hello > sampledir/a.txt && head -c 200000 /dev/urandom > sampledir/big.bin
-hidage backup ./sampledir --redundancy 3 --out s.hmanifest
+mkdir -p project/src
+echo hello > project/a.txt
+head -c 3000000 /dev/urandom > project/big.bin     # a large, unchanging file
 
-# Delete half the shards from the store, then restore anyway
-STORE="${XDG_CONFIG_HOME:-$HOME/.config}/hidage/store"
-find "$STORE" -type f | head -6 | xargs rm
-hidage restore s.hmanifest ./out
-diff -r sampledir out/sampledir && echo "restored identically"
+hidage snapshot ./project                           # snapshot 1 (creates the repo)
+echo goodbye > project/a.txt                        # edit one small file
+hidage snapshot ./project                           # snapshot 2 stores only the delta
+
+hidage snapshots
+A=$(hidage snapshots | awk 'NR==2{print $1}')
+hidage diff "$A" "$(hidage snapshots | awk 'NR==3{print $1}')"   # ~ project/a.txt
+
+hidage restore "$A" ./out                           # older version restores intact
+diff -r project/big.bin out/project/big.bin && echo "big.bin restored identically"
 ```
 
-## Versioned storage (`repo`, Phase 2)
-
-The one-shot `backup` above re-shards everything when a single file changes. The `repo`
-command instead keeps a **versioned repository** that re-stores only what changed —
-content-defined chunking + a Merkle DAG + signed snapshots, git/restic-style. See
-[`DESIGN.md`](DESIGN.md#model-2--versioned-repository-phase-2) for the mechanism; the
-commands:
-
-```sh
-hidage init                              # node identity (signs snapshots)
-hidage repo init ./vault                 # create a repository
-
-hidage repo snapshot ./vault ./project   # take a snapshot (incremental)
-hidage repo snapshots ./vault            # list history
-hidage repo diff ./vault <idA> <idB>     # changed/added/removed paths
-hidage repo restore ./vault <id> ./out   # materialize a version
-hidage repo forget ./vault <id>          # drop a snapshot record …
-hidage repo prune ./vault                # … then GC objects nothing references
-```
-
-Snapshot IDs may be given as any unambiguous prefix. Re-snapshotting an unchanged tree
-stores **0** new objects; changing one small file stores only that file's new chunk plus
-the handful of tree nodes on the path to the root, even if the repo holds large
-unchanged files alongside it.
+`big.bin`'s chunks are written once and reused across both snapshots; only `a.txt`'s new
+chunk and the tree nodes up to the root are added the second time.
 
 ## Tests
 
@@ -125,59 +101,52 @@ unchanged files alongside it.
 go test ./...
 ```
 
-Coverage includes: Phase 1 — encryption round-trip (wrong-key/truncation/corruption
-rejection), fountain encode/decode from a random shard subset (and sub-threshold
-failure), deterministic archive pack/unpack, manifest sign/verify/tamper, the
-content-addressed store. Phase 2 — deterministic chunk encryption, content-defined
-chunk stability under insertion, DAG round-trip/diff/reachability, and repository
-snapshot/restore/incremental-delta/forget+prune/history.
+Coverage includes: deterministic chunk encryption (determinism + wrong-key/corruption
+rejection), content-defined chunk stability under insertion, DAG round-trip / diff /
+reachability, the content-addressed store, and the repository end to end —
+snapshot/restore, incremental-delta accounting, forget + prune, and history/diff. The
+`shard` (fountain-coding) package is tested standalone, reserved for the distribution
+phase.
 
 ## Project layout
 
 | Path | Responsibility |
 |---|---|
-| `cmd/hidage` | CLI commands (`init`, `backup`, `restore`, `info`, `verify`, `repo …`) |
-| `internal/config` | XDG config/store path resolution |
+| `cmd/hidage` | CLI: `init`, `snapshot`, `snapshots`, `restore`, `diff`, `forget`, `prune` |
+| `internal/config` | XDG config + default-repo path resolution |
 | `internal/identity` | Ed25519 node identity (future libp2p peer key) |
-| `internal/archive` | folder ↔ deterministic tar; single-file passthrough |
-| `internal/crypto` | Argon2id KEK, DEK wrap/unwrap, chunked AEAD + deterministic content-addressed seal |
-| `internal/shard` | fountain encode/decode (wraps `google/gofountain`) |
+| `internal/crypto` | Argon2id KEK, key wrap/unwrap, deterministic content-addressed seal |
 | `internal/store` | `Store` interface + local content-addressed FS store |
-| `internal/manifest` | signed recovery recipe (Phase 1 one-shot) |
 | `internal/chunk` | content-defined chunking (FastCDC) |
 | `internal/dag` | Merkle DAG: chunk/file/tree nodes, diff, reachability |
 | `internal/repo` | versioned repository: snapshots, restore, diff, prune |
+| `internal/shard` | fountain encode/decode (`google/gofountain`); reserved for Phase 3 distribution |
 
-## Known limitations (MVP)
+## Known limitations
 
-- **No networking yet** — shards live only in the local store.
-- **In-memory pipeline** — the whole blob and its shards are held in memory, so very
-  large inputs are constrained by RAM. Streaming/block-wise sharding comes later.
-- **Content-addressed dedup vs. small K** — for small inputs the fountain code uses
-  few source symbols (`K` as low as 4), and distinct encoded symbols can occasionally
-  share identical bytes, so they deduplicate to one stored blob. This reduces the true
-  distinct-blob redundancy below the nominal `M`. Negligible for realistically sized
-  inputs; revisit alongside RaptorQ.
-- **Raptor (R10), not RaptorQ** — `gofountain` is pure-Go but implements RFC 5053
-  Raptor, not the newer RFC 6330 RaptorQ. RaptorQ (e.g. via a cgo binding) is a future
-  upgrade.
+- **No networking yet** — objects live only in the local repository; nothing is
+  distributed. Fountain-coded redundancy across peers arrives with networking (Phase 3).
+- **Pseudonymous, not IP-anonymous** — peers are identified by public key; IP-level
+  anonymity is a later phase.
+- **Single-writer** — snapshots assume one owner per repository; concurrent writers from
+  multiple devices (conflict resolution) are not handled.
+- **No at-rest forward secrecy** — a leaked repository master key decrypts every snapshot
+  in that repository.
 
 ## Roadmap
 
-- **Phase 1 — local core.** ✅ Done. The monolithic pipeline above: pack → encrypt →
-  fountain-shard → store, restore from any sufficient subset, signed manifest.
-- **Phase 2 — versioned storage core.** ✅ Done. The `repo` command: **content-defined
-  chunking + a Merkle DAG + signed snapshots**, so updating, changing, or removing files
-  re-stores only the delta (git/restic-style), with history kept. Per-repo deterministic
-  encryption gives content-addressed dedup within your own data without leaking
-  chunk-equality across users. (Fountain re-sharding of objects for redundant
-  *distribution* lands with networking in Phase 3, where it actually matters.)
+- **Phase 1 — local crypto/coding core.** ✅ Done. Client-side encryption, the
+  content-addressed store, and the fountain-coding primitive (`internal/shard`).
+- **Phase 2 — versioned storage core.** ✅ Done. The repository: content-defined chunking
+  + Merkle DAG + signed snapshots, so updating/changing/removing files re-stores only the
+  delta, with history and prune/GC.
 - **Phase 3 — networking + trust.** go-libp2p host keyed by the Ed25519 identity,
-  Kademlia DHT for discovery, pack/shard transfer behind the existing `Store` interface;
-  plus a **trust/whitelist policy** letting a node bypass reputation for keys it
-  explicitly trusts (friend-to-friend, à la Syncthing pairing) or block.
-- **Phase 4 — reputation.** Proof-of-storage audit challenges, signed receipts, and
-  space accounting for the 2–4× contribution model.
+  Kademlia DHT for discovery, and shard transfer behind the existing `Store` interface
+  (objects grouped into packs, each fountain-sharded for redundant distribution); plus a
+  **trust/whitelist policy** letting a node bypass reputation for keys it explicitly
+  trusts (friend-to-friend, à la Syncthing pairing) or block.
+- **Phase 4 — reputation.** Proof-of-storage audit challenges, signed receipts, and space
+  accounting for the 2–4× contribution model.
 - **Phase 5 — anonymity routing.** Optional Tor / Veilid transport to hide IPs.
 
 > A paid storage service is **only an idea, not a planned feature.** The chosen
