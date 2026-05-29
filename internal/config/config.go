@@ -27,6 +27,8 @@ type Paths struct {
 	Dir string
 	// KeyringPath is where the wrapped root secret (master key + identity) lives.
 	KeyringPath string
+	// TrustPath is the node's trust/whitelist policy file.
+	TrustPath string
 }
 
 // DataStoreDir returns the node-wide chunk store path: $HIDAGE_STORE if set,
@@ -52,6 +54,7 @@ func Resolve() (Paths, error) {
 	return Paths{
 		Dir:         dir,
 		KeyringPath: filepath.Join(dir, "keyring.json"),
+		TrustPath:   filepath.Join(dir, "trust.json"),
 	}, nil
 }
 
