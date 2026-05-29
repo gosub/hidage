@@ -136,3 +136,91 @@ func TestDHTProvideAndFind(t *testing.T) {
 		t.Fatal("fetched object via DHT-discovered provider does not match")
 	}
 }
+
+func newNodeID(t *testing.T, blobs Blobs) (*Node, identity.Identity) {
+	t.Helper()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := New(id, blobs, "/ip4/127.0.0.1/tcp/0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { n.Close() })
+	return n, id
+}
+
+func TestPushTrustAndHead(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	// Storage node S: serves and accepts pushes into a sink.
+	sink, _ := store.NewKeyedStore(t.TempDir())
+	s, _ := newNodeID(t, sink)
+	s.EnableDHT(ctx)
+	s.EnablePush(sink, nil) // accept from anyone
+
+	// Owner node A.
+	emptyA, _ := store.NewFSStore(t.TempDir())
+	a, idA := newNodeID(t, emptyA)
+	a.EnableDHT(ctx)
+	if err := a.Bootstrap(ctx, s.Addrs()); err != nil {
+		t.Fatal(err)
+	}
+	s.Bootstrap(ctx, nil)
+
+	// A pushes objects to S.
+	objs := map[string][]byte{}
+	for _, d := range [][]byte{[]byte("obj-one"), []byte("obj-two")} {
+		objs[store.ID(d)] = d
+	}
+	stored, err := a.PushObjects(ctx, s.ID(), objs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored != len(objs) {
+		t.Fatalf("stored %d, want %d", stored, len(objs))
+	}
+	// S now serves them back to A.
+	for id, want := range objs {
+		got, err := a.FetchObject(ctx, s.ID(), id)
+		if err != nil || string(got) != string(want) {
+			t.Fatalf("fetch %s: %v", id, err)
+		}
+	}
+
+	// Head pointer: A publishes, S resolves it.
+	if err := a.PutHead(ctx, idA, "snapshot-xyz"); err != nil {
+		t.Fatal(err)
+	}
+	var head string
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if head, _ = s.GetHead(ctx, idA.Public); head == "snapshot-xyz" {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if head != "snapshot-xyz" {
+		t.Fatalf("GetHead = %q, want snapshot-xyz", head)
+	}
+}
+
+func TestPushRefusedWhenBlocked(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	sink, _ := store.NewKeyedStore(t.TempDir())
+	s, _ := newNodeID(t, sink)
+	s.EnablePush(sink, func(pub []byte) bool { return false }) // refuse everyone
+
+	emptyA, _ := store.NewFSStore(t.TempDir())
+	a, _ := newNodeID(t, emptyA)
+	if _, err := a.Connect(ctx, s.Addrs()[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.PushObjects(ctx, s.ID(), map[string][]byte{store.ID([]byte("x")): []byte("x")}); err == nil {
+		t.Fatal("expected push to be refused")
+	}
+}

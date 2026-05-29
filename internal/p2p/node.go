@@ -26,11 +26,18 @@ type Blobs interface {
 	Has(id string) (bool, error)
 }
 
+// Sink receives objects pushed by other peers (for storage on their behalf).
+type Sink interface {
+	Put(id string, data []byte) error
+}
+
 // Node is a running libp2p host.
 type Node struct {
-	host  host.Host
-	blobs Blobs
-	dht   *dht.IpfsDHT
+	host       host.Host
+	blobs      Blobs
+	dht        *dht.IpfsDHT
+	sink       Sink
+	acceptPush func(senderPub []byte) bool
 }
 
 // New starts a libp2p host whose peer ID is derived from id (the node's Ed25519

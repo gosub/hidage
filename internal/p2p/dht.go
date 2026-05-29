@@ -14,7 +14,11 @@ import (
 // EnableDHT attaches a Kademlia DHT (server mode) to the host, used to discover
 // which peers hold a given object and to publish/resolve signed head pointers.
 func (n *Node) EnableDHT(ctx context.Context) error {
-	d, err := dht.New(ctx, n.host, dht.Mode(dht.ModeServer), dht.ProtocolPrefix("/hidage"))
+	d, err := dht.New(ctx, n.host,
+		dht.Mode(dht.ModeServer),
+		dht.ProtocolPrefix("/hidage"),
+		dht.NamespacedValidator(headNamespace, headValidator{}),
+	)
 	if err != nil {
 		return fmt.Errorf("start DHT: %w", err)
 	}
