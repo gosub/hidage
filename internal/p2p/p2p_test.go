@@ -224,3 +224,48 @@ func TestPushRefusedWhenBlocked(t *testing.T) {
 		t.Fatal("expected push to be refused")
 	}
 }
+
+func TestAuditProofOfStorage(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	holderStore, _ := store.NewFSStore(t.TempDir())
+	data := []byte("the object the holder claims to keep")
+	id, _ := holderStore.Put(data)
+
+	holder := newNode(t, holderStore)
+	challengerStore, _ := store.NewFSStore(t.TempDir())
+	challenger := newNode(t, challengerStore)
+	pid, err := challenger.Connect(ctx, holder.Addrs()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Holder has the object and the bytes match: audit passes.
+	rec, err := challenger.Audit(ctx, pid, id, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.OK {
+		t.Fatal("audit should pass for a held, matching object")
+	}
+
+	// Object the holder does not have: audit fails (not OK).
+	rec, err = challenger.Audit(ctx, pid, store.ID([]byte("absent")), []byte("absent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.OK {
+		t.Fatal("audit should fail for a missing object")
+	}
+
+	// Holder has the object but the challenger expects different bytes
+	// (i.e. the holder is serving the wrong/corrupted data): audit fails.
+	rec, err = challenger.Audit(ctx, pid, id, []byte("different expected bytes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.OK {
+		t.Fatal("audit should fail when the proof does not match expected bytes")
+	}
+}

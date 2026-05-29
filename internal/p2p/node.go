@@ -34,6 +34,7 @@ type Sink interface {
 // Node is a running libp2p host.
 type Node struct {
 	host       host.Host
+	id         identity.Identity
 	blobs      Blobs
 	dht        *dht.IpfsDHT
 	sink       Sink
@@ -55,8 +56,9 @@ func New(id identity.Identity, blobs Blobs, listen string) (*Node, error) {
 	if err != nil {
 		return nil, fmt.Errorf("start libp2p host: %w", err)
 	}
-	n := &Node{host: h, blobs: blobs}
+	n := &Node{host: h, id: id, blobs: blobs}
 	n.registerObjectHandler()
+	n.registerAuditHandler()
 	return n, nil
 }
 
