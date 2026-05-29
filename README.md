@@ -43,7 +43,7 @@ files ─FastCDC chunk─▶ chunks ─encrypt─▶ Merkle DAG (file + tree nod
 
 | What | Where | Notes |
 |---|---|---|
-| Node identity + master key | `~/.config/hidage/` | tiny; the key is wrapped under your passphrase |
+| Keyring (root secret → master key + identity) | `~/.config/hidage/keyring.json` | one 32-byte root, wrapped under your passphrase; export it as a recovery phrase |
 | Per-folder metadata (config, snapshots, DAG nodes) | `<folder>/.hidage/` | travels with the folder, like `.git` |
 | Bulk chunk data | `$HIDAGE_STORE` or `/opt/hidage/store` | node-wide, outside `$HOME`; one pooled copy per chunk, hard-linked per repo so identical chunks dedup across folders |
 
@@ -60,7 +60,8 @@ go build -o hidage ./cmd/hidage
 ## Usage
 
 ```sh
-hidage init                       # one-time: create identity + user encryption key
+hidage init                       # one-time: create the keyring (master key + identity)
+hidage recovery-code              # print the 24-word phrase — WRITE IT DOWN
 
 hidage snapshot ./project         # snapshot a folder (creates ./project/.hidage on first use)
 hidage snapshot --replace ./project   # … superseding the previous snapshot (no history kept)
@@ -69,6 +70,8 @@ hidage diff <idA> <idB>           # paths added / removed / modified between sna
 hidage restore <id> ./out         # materialize a version into ./out
 hidage forget <id>                # drop a snapshot record …
 hidage prune                      # … then GC objects no snapshot references
+
+hidage recover                    # on a new machine: rebuild the keyring from the phrase
 ```
 
 - A tracked folder is one containing `.hidage/`; `snapshot` creates it on first use.
@@ -80,6 +83,12 @@ hidage prune                      # … then GC objects no snapshot references
 - Snapshot IDs may be given as any unambiguous **prefix**.
 - The passphrase (set at `init`) is read interactively; for scripting/tests set
   `HIDAGE_PASSPHRASE`.
+- **Recovery:** `recovery-code` prints a 24-word BIP39 phrase encoding the root secret
+  (master key + identity). Keep it offline — anyone with it can decrypt your backups, and
+  it's the only way to get your key back if you lose this machine. `hidage recover` reads
+  the phrase from stdin and rebuilds the keyring (under a new passphrase). *(Recovering
+  the snapshots/chunks themselves from peers is Phase 3f — for now their `.hidage` and the
+  chunk store must still exist.)*
 
 ## End-to-end demo
 
@@ -120,7 +129,8 @@ go test ./...
 Coverage includes: deterministic chunk encryption (determinism + wrong-key/corruption
 rejection), content-defined chunk stability under insertion, DAG round-trip / diff /
 reachability, both stores (FS + hardlink cross-repo dedup and refcounted delete), the
-user-level key (init/load/wrong-pass), and the repository end to end — snapshot/restore,
+keyring (deterministic derivation, wrong-pass, recovery-code roundtrip), and the
+repository end to end — snapshot/restore,
 `.hidage` exclusion, incremental-delta accounting, history/diff, `--replace`, and
 forget + prune. The `shard` (fountain-coding) package is tested standalone, reserved for
 the distribution phase.
@@ -129,10 +139,10 @@ the distribution phase.
 
 | Path | Responsibility |
 |---|---|
-| `cmd/hidage` | CLI: `init`, `snapshot`, `snapshots`, `restore`, `diff`, `forget`, `prune` |
+| `cmd/hidage` | CLI: `init`, `snapshot`, `snapshots`, `restore`, `diff`, `forget`, `prune`, `recovery-code`, `recover` |
 | `internal/config` | config + data-store path resolution (`HIDAGE_STORE`) |
-| `internal/identity` | Ed25519 node identity (future libp2p peer key) |
-| `internal/userkey` | user-level encryption key, wrapped under the passphrase |
+| `internal/keyring` | root secret (wrapped under passphrase) → master key + identity; BIP39 recovery code |
+| `internal/identity` | Ed25519 keypair derived from the keyring (future libp2p peer key) |
 | `internal/crypto` | Argon2id KEK, key wrap/unwrap, deterministic content-addressed seal |
 | `internal/store` | `Store` interface; `FSStore` (meta) + `HardlinkStore` (pooled, cross-repo-dedup data) |
 | `internal/chunk` | content-defined chunking (FastCDC) |
@@ -160,14 +170,14 @@ the distribution phase.
 - **Phase 2 — versioned storage core.** ✅ Done. The repository: content-defined chunking
   + Merkle DAG + signed snapshots, so updating/changing/removing files re-stores only the
   delta, with history and prune/GC.
-- **Phase 3 — networking + trust + recovery.** go-libp2p host keyed by the Ed25519
-  identity, Kademlia DHT for discovery, and shard transfer behind the existing `Store`
-  interface (objects grouped into packs, each fountain-sharded for redundant
-  distribution); a **trust/whitelist policy** letting a node bypass reputation for keys it
-  explicitly trusts (friend-to-friend, à la Syncthing pairing) or block; and **disaster
-  recovery** — distributing snapshots + DAG nodes (not just chunks), an exportable
-  recovery code for the master key, and a signed DHT head pointer so a backup is
-  restorable from a tiny off-machine seed (see [`DESIGN.md`](DESIGN.md)).
+- **Phase 3 — networking + trust + recovery.** *In progress.* ✅ **Recovery code** — keys
+  derive from one root, exportable as a 24-word phrase (`recovery-code` / `recover`).
+  Remaining: go-libp2p host keyed by the Ed25519 identity, Kademlia DHT for discovery, and
+  shard transfer behind the existing `Store` interface (objects grouped into packs, each
+  fountain-sharded for redundant distribution); a **trust/whitelist policy** (prefer/block
+  specific keys, friend-to-friend); and the rest of **disaster recovery** — distributing
+  snapshots + DAG nodes (not just chunks) and a signed DHT head pointer, so a backup is
+  restorable from just the recovery phrase + a peer (see [`DESIGN.md`](DESIGN.md)).
 - **Phase 4 — reputation.** Proof-of-storage audit challenges, signed receipts, and space
   accounting for the 2–4× contribution model.
 - **Phase 5 — anonymity routing.** Optional Tor / Veilid transport to hide IPs.

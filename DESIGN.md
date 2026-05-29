@@ -12,21 +12,24 @@ update re-stores only what changed; history is kept and old versions stay restor
 
 ## Shared primitives
 
-### Identity (`internal/identity`)
-A node has an Ed25519 keypair. The public key is its pseudonymous identity (and the
-future libp2p peer key); the private key signs snapshots. The seed is stored
-base64-encoded at `~/.config/hidage/identity.key` (mode 0600).
+### Key hierarchy (`internal/keyring`, `internal/crypto`, `internal/identity`)
+Everything derives from one secret:
 
-### Key hierarchy (`internal/crypto`, `internal/userkey`)
-- **KEK** — derived from the user's passphrase with **Argon2id** (defaults: time=3,
-  memory=64 MiB, threads=4, 32-byte output, 16-byte random salt).
-- **Master key** — a single random 256-bit key **per user** (not per repository),
-  generated at `hidage init`, wrapped under the KEK with ChaCha20-Poly1305
-  (`nonce || ciphertext`), and stored at `~/.config/hidage/masterkey.json`. Only the
-  wrapped form is written. A wrong passphrase fails the AEAD tag, which is how unlock
-  errors surface. Because every repository encrypts with this one key, identical chunks
-  produce identical ciphertext **across all your folders**, so the shared data store
-  deduplicates them globally.
+- **Root** — a single random 32-byte secret per user, generated at `hidage init`,
+  wrapped under a passphrase **KEK** (Argon2id; defaults: time=3, memory=64 MiB, threads=4,
+  16-byte salt) with ChaCha20-Poly1305 (`nonce || ciphertext`) and stored at
+  `~/.config/hidage/keyring.json`. Only the wrapped form is written; a wrong passphrase
+  fails the AEAD tag.
+- **Master key** = `HKDF-SHA256(root, "hidage/master-key/v1", 32)` — encrypts all
+  repository objects. Being per-user, identical chunks encrypt identically **across all
+  your folders**, so the shared data store deduplicates them globally.
+- **Identity** = Ed25519 keypair from `HKDF-SHA256(root, "hidage/identity/v1", 32)`. The
+  public key is the node's pseudonymous identity (and future libp2p peer key); the private
+  key signs snapshots. It is *derived*, not stored separately.
+- **Recovery code** — the root encodes to a 24-word **BIP39** mnemonic (`hidage
+  recovery-code`). Because both the master key and the identity derive from the root, this
+  single phrase backs up the entire node's secrets; `hidage recover` rebuilds the keyring
+  from it on a fresh machine (under a new passphrase).
 
 ### Content-addressed stores (`internal/store`)
 A `Store` is a blob map keyed by the hex SHA-256 of its contents; `Put` is idempotent.
@@ -66,7 +69,7 @@ $HIDAGE_STORE (default /opt/hidage/store)
 ```
 
 `Init` writes `.hidage/` and its marker config; `Open` reads it. Both take the user
-master key (loaded once via `internal/userkey`) and the data-store path. `Find` locates a
+master key (loaded once via `internal/keyring`) and the data-store path. `Find` locates a
 repository by walking up from the current directory, so commands work git-style from
 anywhere inside a tracked folder; `snapshot` auto-creates `.hidage/` on first use. The
 data store path comes from `$HIDAGE_STORE` or the `/opt/hidage/store` default; a
@@ -237,12 +240,11 @@ For this to actually work, three things the current build keeps only locally mus
    network like any other object, or the chunk data is unusable (no recipe to reassemble
    it).
 
-2. **Make the master key recoverable.** It is a *random* key stored only in
-   `~/.config/hidage/masterkey.json`; lose that and the passphrase alone recovers nothing.
-   Add an exportable **recovery code** (a BIP39-style mnemonic encoding the master key and
-   the identity seed) to write down/escrow, or derive the master key deterministically from
-   the passphrase (simpler recovery, but the passphrase becomes the key and cannot be
-   rotated without re-encrypting).
+2. **Make the keys recoverable.** ✅ *Done* — both the master key and the identity derive
+   from a single 32-byte root, exportable as a 24-word BIP39 phrase (`hidage
+   recovery-code`) and restorable with `hidage recover`. So losing the key file no longer
+   means losing the data, *provided you kept the phrase*. (This recovers the **keys**;
+   recovering the snapshots/chunks themselves still depends on item 1.)
 
 3. **Find the latest snapshot with zero local state.** Publish an IPNS-style **signed head
    pointer** in the DHT keyed by the owner's identity public key (`pubkey → latest snapshot
