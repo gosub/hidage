@@ -78,6 +78,9 @@ func Reassemble(rel *Release, get func(id string) ([]byte, error)) (map[string][
 			if err != nil {
 				continue // shard unavailable; that's what the redundancy is for
 			}
+			if hashID(data) != ref.ID {
+				continue // a peer served the wrong bytes for this id; ignore it
+			}
 			have = append(have, shard.Shard{Index: ref.Index, Data: data})
 		}
 		packBytes, err := shard.Decode(desc.Params, have)

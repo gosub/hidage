@@ -33,10 +33,14 @@ type Config struct {
 // Repo is an opened repository rooted at a tracked folder.
 type Repo struct {
 	Folder    string // the tracked folder (contains .hidage/)
+	repoID    string
 	meta      store.Store
 	data      store.Store
 	masterKey []byte
 }
+
+// RepoID returns this repository's stable identifier (from .hidage/config.json).
+func (r *Repo) RepoID() string { return r.repoID }
 
 func metaDir(folder string) string    { return filepath.Join(folder, hidageDir, "objects") }
 func snapsDir(folder string) string   { return filepath.Join(folder, hidageDir, "snapshots") }
@@ -120,7 +124,7 @@ func Init(folder string, masterKey []byte, dataDir string) (*Repo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Repo{Folder: folder, meta: meta, data: ds, masterKey: masterKey}, nil
+	return &Repo{Folder: folder, repoID: cfg.RepoID, meta: meta, data: ds, masterKey: masterKey}, nil
 }
 
 // Open opens an existing repository in folder.
@@ -148,5 +152,5 @@ func Open(folder string, masterKey []byte, dataDir string) (*Repo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Repo{Folder: folder, meta: meta, data: ds, masterKey: masterKey}, nil
+	return &Repo{Folder: folder, repoID: cfg.RepoID, meta: meta, data: ds, masterKey: masterKey}, nil
 }

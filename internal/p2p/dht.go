@@ -4,12 +4,31 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"time"
 
 	"github.com/ipfs/go-cid"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multihash"
 )
+
+// WaitForPeers blocks until the DHT routing table holds at least min peers, or
+// the timeout/ctx elapses. Record puts/gets are unreliable until the table is
+// populated, so callers wait after bootstrapping before publishing or resolving
+// head pointers.
+func (n *Node) WaitForPeers(ctx context.Context, min int, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if n.dht != nil && n.dht.RoutingTable().Size() >= min {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
 
 // EnableDHT attaches a Kademlia DHT (server mode) to the host, used to discover
 // which peers hold a given object and to publish/resolve signed head pointers.

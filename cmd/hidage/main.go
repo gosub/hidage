@@ -33,6 +33,7 @@ func main() {
 		newServeCmd(),
 		newPublishCmd(),
 		newNetRestoreCmd(),
+		newNetListCmd(),
 		newReputationCmd(),
 		newAuditCmd(),
 		newAccountingCmd(),

@@ -15,6 +15,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/spf13/cobra"
 
+	"hidage/internal/account"
 	"hidage/internal/accounting"
 	"hidage/internal/config"
 	"hidage/internal/dag"
@@ -178,6 +179,22 @@ func newPublishCmd() *cobra.Command {
 			if err := node.Bootstrap(ctx, bootstrap); err != nil {
 				return err
 			}
+			node.WaitForPeers(ctx, 1, 15*time.Second) // settle the DHT before record ops
+
+			// Merge this repo's release into the owner's account manifest, so the
+			// single head pointer indexes every backed-up folder, not just this one.
+			manifest := fetchManifest(ctx, node, kr.Identity().Public)
+			manifest.Upsert(account.Entry{
+				RepoID:    r.RepoID(),
+				Name:      snap.Source,
+				ReleaseID: relID,
+				UpdatedAt: time.Now().UTC(),
+			})
+			manifestBytes, err := manifest.Bytes()
+			if err != nil {
+				return err
+			}
+			manifestID := store.ID(manifestBytes)
 			paths, err := config.Ensure()
 			if err != nil {
 				return err
@@ -215,7 +232,8 @@ func newPublishCmd() *cobra.Command {
 				return fmt.Errorf("no acceptable peers to publish to")
 			}
 
-			assignments := spreadShards(shardBlobs, relID, relBytes, len(accepted))
+			common := map[string][]byte{relID: relBytes, manifestID: manifestBytes}
+			assignments := spreadShards(shardBlobs, common, len(accepted))
 			for i, p := range accepted {
 				push := assignments[i]
 				var bytes int64
@@ -232,11 +250,12 @@ func newPublishCmd() *cobra.Command {
 				}
 				fmt.Printf("  %s: stored %d shards (%d bytes)\n", p.id, stored, bytes)
 			}
-			if err := node.PutHead(ctx, kr.Identity(), relID); err != nil {
+			if err := node.PutHead(ctx, kr.Identity(), manifestID); err != nil {
 				return fmt.Errorf("publish head: %w", err)
 			}
-			fmt.Printf("Published snapshot %s as %d shards across %d peers (%.1fx redundancy); head updated.\n",
-				snap.ID[:16], len(shardBlobs), len(accepted), redundancy)
+			fmt.Printf("Published %q (%s) as %d shards across %d peers (%.1fx redundancy).\n",
+				snap.Source, r.RepoID()[:12], len(shardBlobs), len(accepted), redundancy)
+			fmt.Printf("Account now indexes %d backup(s).\n", len(manifest.Entries))
 			return nil
 		},
 	}
@@ -252,11 +271,15 @@ type peerID struct {
 }
 
 // spreadShards assigns shard blobs round-robin across n peers, and gives the
-// Release descriptor to every peer (so it can always be fetched).
-func spreadShards(shardBlobs map[string][]byte, relID string, relBytes []byte, n int) []map[string][]byte {
+// common objects (Release + account manifest) to every peer so they can always
+// be fetched.
+func spreadShards(shardBlobs, common map[string][]byte, n int) []map[string][]byte {
 	out := make([]map[string][]byte, n)
 	for i := range out {
-		out[i] = map[string][]byte{relID: relBytes}
+		out[i] = map[string][]byte{}
+		for id, data := range common {
+			out[i][id] = data
+		}
 	}
 	i := 0
 	for id, data := range shardBlobs {
@@ -266,12 +289,32 @@ func spreadShards(shardBlobs map[string][]byte, relID string, relBytes []byte, n
 	return out
 }
 
+// fetchManifest resolves the owner's current account manifest from the network,
+// returning an empty one if none exists or it can't be verified.
+func fetchManifest(ctx context.Context, node *p2p.Node, owner ed25519.PublicKey) *account.Manifest {
+	mid, err := node.GetHead(ctx, owner)
+	if err != nil || mid == "" {
+		return account.New()
+	}
+	data, err := node.GetObject(ctx, mid)
+	if err != nil || store.ID(data) != mid {
+		return account.New()
+	}
+	m, err := account.Parse(data)
+	if err != nil {
+		return account.New()
+	}
+	return m
+}
+
 func newNetRestoreCmd() *cobra.Command {
 	var bootstrap []string
 	var ownerHex string
+	var repoSel string
+	var all bool
 	cmd := &cobra.Command{
 		Use:   "net-restore <out-dir>",
-		Short: "Recover a backup from the network (head pointer → snapshot → objects)",
+		Short: "Recover backups from the network (head → account manifest → shards)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kr, err := unlock()
@@ -301,15 +344,15 @@ func newNetRestoreCmd() *cobra.Command {
 				return err
 			}
 
-			var relID string
+			var mid string
 			deadline := time.Now().Add(60 * time.Second)
 			for time.Now().Before(deadline) {
-				if relID, _ = node.GetHead(ctx, owner); relID != "" {
+				if mid, _ = node.GetHead(ctx, owner); mid != "" {
 					break
 				}
 				time.Sleep(time.Second)
 			}
-			if relID == "" {
+			if mid == "" {
 				return fmt.Errorf("could not resolve a head pointer for that owner")
 			}
 
@@ -319,40 +362,86 @@ func newNetRestoreCmd() *cobra.Command {
 			}
 			ns := netstore.New(node, cache)
 
-			// Fetch the Release, then gather K-of-M shards per pack from whoever
-			// still has them and rebuild every object.
-			relBytes, err := ns.Get(relID)
+			manBytes, err := ns.Get(mid)
 			if err != nil {
-				return fmt.Errorf("fetch release: %w", err)
+				return fmt.Errorf("fetch account manifest: %w", err)
 			}
-			var rel pack.Release
-			if err := json.Unmarshal(relBytes, &rel); err != nil {
+			if store.ID(manBytes) != mid {
+				return fmt.Errorf("account manifest failed integrity check")
+			}
+			manifest, err := account.Parse(manBytes)
+			if err != nil {
 				return err
 			}
-			objects, err := pack.Reassemble(&rel, ns.Get)
-			if err != nil {
-				return fmt.Errorf("reassemble: %w", err)
+			if len(manifest.Entries) == 0 {
+				return fmt.Errorf("owner has no published backups")
 			}
-			for id, data := range objects {
-				if err := cache.Put(id, data); err != nil {
+
+			// Choose which backup(s) to restore.
+			var targets []account.Entry
+			switch {
+			case all:
+				targets = manifest.Entries
+			case repoSel != "":
+				e, err := manifest.Find(repoSel)
+				if err != nil {
 					return err
 				}
+				targets = []account.Entry{*e}
+			case len(manifest.Entries) == 1:
+				targets = manifest.Entries
+			default:
+				fmt.Println("Multiple backups found; pick one with --repo <name> or use --all:")
+				for _, e := range manifest.Entries {
+					fmt.Printf("  %-24s  %s\n", e.Name, e.RepoID[:12])
+				}
+				return fmt.Errorf("specify --repo or --all")
 			}
-			snap, err := repo.ParseSnapshot(objects[rel.SnapshotID])
-			if err != nil {
-				return err
+
+			for _, e := range targets {
+				if err := restoreRelease(ns, cache, kr.MasterKey(), e.ReleaseID, args[0]); err != nil {
+					return fmt.Errorf("restore %q: %w", e.Name, err)
+				}
+				fmt.Printf("Recovered %q into %s\n", e.Name, args[0])
 			}
-			loader := dag.NewLoader(cache, cache, kr.MasterKey())
-			if err := repo.RestoreWith(loader, snap, args[0]); err != nil {
-				return err
-			}
-			fmt.Printf("Recovered snapshot %s into %s\n", snap.ID[:16], args[0])
 			return nil
 		},
 	}
 	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
 	cmd.Flags().StringVar(&ownerHex, "owner", "", "owner public key hex (default: your own)")
+	cmd.Flags().StringVar(&repoSel, "repo", "", "which backup to restore (name or repo-id prefix)")
+	cmd.Flags().BoolVar(&all, "all", false, "restore every backup in the account")
 	return cmd
+}
+
+// restoreRelease fetches a Release, reassembles its objects from K-of-M shards,
+// and restores the snapshot into outDir (under its source name).
+func restoreRelease(ns *netstore.Store, cache *store.KeyedStore, masterKey []byte, relID, outDir string) error {
+	relBytes, err := ns.Get(relID)
+	if err != nil {
+		return fmt.Errorf("fetch release: %w", err)
+	}
+	if store.ID(relBytes) != relID {
+		return fmt.Errorf("release failed integrity check")
+	}
+	var rel pack.Release
+	if err := json.Unmarshal(relBytes, &rel); err != nil {
+		return err
+	}
+	objects, err := pack.Reassemble(&rel, ns.Get)
+	if err != nil {
+		return fmt.Errorf("reassemble: %w", err)
+	}
+	for id, data := range objects {
+		if err := cache.Put(id, data); err != nil {
+			return err
+		}
+	}
+	snap, err := repo.ParseSnapshot(objects[rel.SnapshotID])
+	if err != nil {
+		return err
+	}
+	return repo.RestoreWith(dag.NewLoader(cache, cache, masterKey), snap, outDir)
 }
 
 // reprovide announces every locally-held object to the DHT.
