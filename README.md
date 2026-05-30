@@ -93,7 +93,7 @@ hidage net-restore ./out --all --bootstrap <addr>   # recover from the network: 
 # reputation, audits, accounting
 hidage audit --peer <addr>        # challenge peers to prove they hold your shards
                                   #   (updates reputation; revokes credit on failure)
-hidage reputation                 # per-peer audit pass/fail scores
+hidage reputation                 # per-peer audit scores (recency-weighted)
 hidage accounting                 # bytes you store for peers vs. they store for you
 ```
 
@@ -151,14 +151,15 @@ go test ./...
 
 Coverage includes: deterministic chunk encryption (determinism + wrong-key/corruption
 rejection), content-defined chunk stability under insertion, DAG round-trip / diff /
-reachability, both stores (FS + hardlink cross-repo dedup and refcounted delete), the
-keyring (deterministic derivation, wrong-pass, recovery-code roundtrip), and the
-repository end to end — snapshot/restore,
-`.hidage` exclusion, incremental-delta accounting, history/diff, `--replace`, and
-forget + prune. Networking: two-node object transfer, DHT provide/discover, push gated by
-trust, signed head publish/resolve, proof-of-storage audits, reputation scoring, space
-accounting, the account manifest (upsert/find/roundtrip), Reed-Solomon encode/decode (incl.
-decode from any K subset), pack build/reassemble below and above the shard threshold, a
+reachability, the three stores (FS + hardlink cross-repo dedup and refcounted delete +
+keyed-store lease reap/renew), the keyring (deterministic derivation, wrong-pass,
+recovery-code roundtrip), and the repository end to end — snapshot/restore, `.hidage`
+exclusion, incremental-delta accounting, history/diff, `--replace`, and forget + prune.
+Networking: two-node object transfer, DHT provide/discover, push gated by trust, signed
+head publish/resolve, proof-of-storage audits, reputation (recency decay: stale reverts to
+unproven, a recent fail dominates banked passes), space accounting (ratio/free + revoke),
+the account manifest (upsert/find/roundtrip), Reed-Solomon encode/decode (incl. decode from
+any K subset), deterministic pack build + reassemble below and above the shard threshold, a
 **cross-node recovery** test, and the **redundant-recovery** test (shards spread over 3
 peers, one killed, full byte-identical recovery from the survivors).
 
@@ -171,7 +172,7 @@ peers, one killed, full byte-identical recovery from the survivors).
 | `internal/keyring` | root secret (wrapped under passphrase) → master key + identity; BIP39 recovery code |
 | `internal/identity` | Ed25519 keypair derived from the keyring (libp2p peer key) |
 | `internal/trust` | peer trust policy: whitelist / blocklist, consulted before reputation |
-| `internal/reputation` | per-peer audit pass/fail → Laplace-smoothed score |
+| `internal/reputation` | per-peer audit pass/fail → recency-weighted (time-decayed), Laplace-smoothed score |
 | `internal/accounting` | per-peer space ledger + contribution-ratio enforcement |
 | `internal/crypto` | Argon2id KEK, key wrap/unwrap, deterministic content-addressed seal |
 | `internal/store` | `Store`; `FSStore` (meta) + `HardlinkStore` (pooled, cross-repo dedup) + `KeyedStore` |
