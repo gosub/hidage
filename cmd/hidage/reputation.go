@@ -40,9 +40,9 @@ func newReputationCmd() *cobra.Command {
 				fmt.Println("(no audit history yet; run `hidage audit`)")
 				return nil
 			}
-			fmt.Printf("%-64s  %5s  %5s  %6s  %s\n", "PUBKEY", "PASS", "FAIL", "SCORE", "GOOD")
+			fmt.Printf("%-64s  %6s  %6s  %6s  %s\n", "PUBKEY", "PASS", "FAIL", "SCORE", "GOOD")
 			for _, e := range entries {
-				fmt.Printf("%-64s  %5d  %5d  %6.2f  %v\n", e.PubKey, e.Passes, e.Fails, e.Score, e.Good)
+				fmt.Printf("%-64s  %6.1f  %6.1f  %6.2f  %v\n", e.PubKey, e.Passes, e.Fails, e.Score, e.Good)
 			}
 			return nil
 		},

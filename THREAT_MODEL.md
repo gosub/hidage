@@ -82,10 +82,12 @@ detection is **only as frequent as you run `hidage audit`** — between audits, 
 redundancy can silently degrade. Mitigate by auditing on a schedule and publishing
 at `--redundancy` high enough to tolerate some silent loss.
 
-### Reputation has no decay
-Scores are a cumulative (Laplace-smoothed) pass rate, so a peer can bank many
-passes and then misbehave while staying "good" for a while. An EWMA / recency
-weighting would fix this; not yet implemented.
+### Reputation recency
+Scores are **recency-weighted**: audit evidence decays exponentially (≈30-day
+half-life), so banked old passes can't mask a recent failure and a peer not
+audited in a long time fades back toward *unproven* (prompting a fresh audit).
+Residual: the half-life is a fixed constant, not adaptive to your audit cadence,
+and reputation is still only as current as your last `hidage audit`.
 
 ### Head-pointer rollback
 Head records are owner-signed and newest-wins, but an eclipsing peer could serve an

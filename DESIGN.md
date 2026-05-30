@@ -261,11 +261,13 @@ These keep distributed data recoverable and keep peers honest.
   its storage budget with you).
 
 - **Reputation** (`internal/reputation`) — audit outcomes accumulate per peer into a
-  Laplace-smoothed pass rate, kept **local and self-written** (your view = your own audits;
-  not gossiped, so Sybils can't inject standing). The trust policy's *neutral* verdict
-  defers here: a neutral peer is used once it has enough history and a high enough score,
-  and avoided if its history is low-scoring. `publish` filters target peers through `trust`
-  then reputation.
+  **recency-weighted** (exponential decay, ~30-day half-life), Laplace-smoothed pass rate,
+  kept **local and self-written** (your view = your own audits; not gossiped, so Sybils
+  can't inject standing). Decay means recent audits dominate: banked old passes can't mask
+  a recent failure, and a peer not audited in a long time fades back toward *unproven*. The
+  trust policy's *neutral* verdict defers here: a peer is used unless it is *proven bad*
+  (enough recent history and a low score); unproven/little-history peers are still used.
+  `publish` filters target peers through `trust` then reputation.
 
 - **Space accounting** (`internal/accounting`) — a per-peer ledger of bytes stored *for
   them* vs. *by them*. On accepting a push, a node enforces a contribution ratio: it stores

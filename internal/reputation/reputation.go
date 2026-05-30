@@ -1,28 +1,45 @@
 // Package reputation tracks how reliably each peer has answered proof-of-storage
 // audits, so a node can prefer dependable hosts. Scores are local observations
-// (Laplace-smoothed pass rate) persisted per peer public key. The trust policy's
-// "neutral" verdict defers here: a neutral peer is used only once it has enough
-// audit history and a high enough score.
+// (a recency-weighted, Laplace-smoothed pass rate) persisted per peer public key.
+// They gate publishing only by *excluding proven-bad peers*: the trust policy's
+// "neutral" verdict is used unless the peer has enough recent audit history and a
+// low score. Peers with little (or stale) history are treated as unproven and are
+// still used — reputation is earned by storing reliably, not a prerequisite.
+//
+// Evidence decays with wall-clock time (exponential, by decayHalfLife), so recent
+// audits dominate: a peer can't bank old passes to mask recent failures, a peer
+// that improves recovers, and a peer not audited in a long time fades back toward
+// unproven (prompting a fresh audit).
 package reputation
 
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"sort"
 	"time"
 )
 
 const (
-	// minSamples is how many audits a neutral peer needs before it counts as good.
-	minSamples = 3
-	// goodThreshold is the minimum score for a neutral peer to be used.
-	goodThreshold = 0.8
+	// minSamples is the recent-evidence mass (decayed audit count) a peer needs
+	// before it can be classified Good or Bad — roughly three recent audits, set
+	// just under 3 because decay leaves the effective count slightly below the raw
+	// audit count.
+	minSamples = 2.5
+	// goodThreshold is the score cutoff separating Good from Bad. It sits below
+	// the achievable maximum (decay+smoothing cap a perfect peer near ~0.88) so a
+	// steadily-passing peer is Good after ~3 audits, while a recent failure (which
+	// pulls a peer toward ~0.64) drops it to Bad.
+	goodThreshold = 0.7
+	// decayHalfLife is how long until an audit's weight halves. Evidence older
+	// than a few half-lives barely counts, so reputation reflects recent behavior.
+	decayHalfLife = 30 * 24 * time.Hour
 )
 
 type stat struct {
-	Passes   int       `json:"passes"`
-	Fails    int       `json:"fails"`
+	Passes   float64   `json:"passes"` // decayed pseudo-count, as of LastSeen
+	Fails    float64   `json:"fails"`
 	LastSeen time.Time `json:"lastSeen"`
 }
 
@@ -48,65 +65,86 @@ func Load(path string) (*Store, error) {
 	return s, nil
 }
 
+// effective returns a peer's pass/fail pseudo-counts decayed forward to now.
+func effective(st *stat, now time.Time) (passes, fails float64) {
+	if st == nil {
+		return 0, 0
+	}
+	elapsed := now.Sub(st.LastSeen)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	factor := math.Exp2(-float64(elapsed) / float64(decayHalfLife))
+	return st.Passes * factor, st.Fails * factor
+}
+
 // Record notes the outcome of an audit against the given peer and persists it.
+// Existing evidence is decayed to the present before the new observation is added,
+// so the stored counts always represent the recency-weighted history.
 func (s *Store) Record(pubHex string, ok bool) error {
+	now := time.Now().UTC()
 	st := s.peers[pubHex]
 	if st == nil {
 		st = &stat{}
 		s.peers[pubHex] = st
 	}
+	p, f := effective(st, now)
 	if ok {
-		st.Passes++
+		p++
 	} else {
-		st.Fails++
+		f++
 	}
-	st.LastSeen = time.Now().UTC()
+	st.Passes, st.Fails, st.LastSeen = p, f, now
 	return s.save()
 }
 
-// Score returns the Laplace-smoothed pass rate for a peer (0.5 with no history).
+// Score returns the recency-weighted, Laplace-smoothed pass rate (0.5 with no
+// history).
 func (s *Store) Score(pubHex string) float64 {
 	st := s.peers[pubHex]
 	if st == nil {
 		return 0.5
 	}
-	return float64(st.Passes+1) / float64(st.Passes+st.Fails+2)
+	p, f := effective(st, time.Now().UTC())
+	return (p + 1) / (p + f + 2)
 }
 
-// Good reports whether a peer has enough history and a high enough score to rely
-// on when no explicit trust decision applies.
+// Good reports whether a peer has enough recent history and a high enough score
+// to rely on when no explicit trust decision applies.
 func (s *Store) Good(pubHex string) bool {
-	st := s.peers[pubHex]
-	if st == nil || st.Passes+st.Fails < minSamples {
+	p, f := effective(s.peers[pubHex], time.Now().UTC())
+	if p+f < minSamples {
 		return false
 	}
-	return s.Score(pubHex) >= goodThreshold
+	return (p+1)/(p+f+2) >= goodThreshold
 }
 
-// Bad reports whether a peer has enough audit history and a score low enough to
-// avoid. (Distinct from "not Good", which also covers peers with no history.)
+// Bad reports whether a peer has enough recent history and a score low enough to
+// avoid. (Distinct from "not Good", which also covers peers with little history.)
 func (s *Store) Bad(pubHex string) bool {
-	st := s.peers[pubHex]
-	if st == nil || st.Passes+st.Fails < minSamples {
+	p, f := effective(s.peers[pubHex], time.Now().UTC())
+	if p+f < minSamples {
 		return false
 	}
-	return s.Score(pubHex) < goodThreshold
+	return (p+1)/(p+f+2) < goodThreshold
 }
 
-// Entry is one peer's reputation, for listing.
+// Entry is one peer's reputation (decayed to now), for listing.
 type Entry struct {
 	PubKey string
-	Passes int
-	Fails  int
+	Passes float64
+	Fails  float64
 	Score  float64
 	Good   bool
 }
 
 // List returns all peers' reputations, best score first.
 func (s *Store) List() []Entry {
+	now := time.Now().UTC()
 	out := make([]Entry, 0, len(s.peers))
-	for k, st := range s.peers {
-		out = append(out, Entry{PubKey: k, Passes: st.Passes, Fails: st.Fails, Score: s.Score(k), Good: s.Good(k)})
+	for k := range s.peers {
+		p, f := effective(s.peers[k], now)
+		out = append(out, Entry{PubKey: k, Passes: p, Fails: f, Score: s.Score(k), Good: s.Good(k)})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
 	return out
