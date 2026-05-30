@@ -66,6 +66,14 @@ bad reputation discards its identity and rejoins clean with a fresh free quota).
 The robust mitigation is the friend-to-friend regime; costly identities
 (proof-of-work/stake) are out of scope.
 
+`publish --open` is the entry point to this exposure: it hands shards to *discovered
+strangers*. It is gated — Bad/Blocked peers are excluded, candidates are ranked by
+your own reputation of them, the count is capped (`--open-peers`), and shards are
+encrypted — but it is explicitly **best-effort**. For data you can't afford to lose,
+use `--peer`/`--trusted`. (Discovered strangers you've never audited are *unproven*,
+so "ranked by reputation" mostly orders the few you do know ahead of the rest — which
+is what transitive reputation, if added, would improve.)
+
 ### Audit outsourcing
 The audit proves *someone* holds the bytes, not that *this* peer does. A lazy peer
 could fetch a shard from a peer that actually stored it, then answer. The challenge
@@ -112,8 +120,9 @@ lease GC reclaims it. Neither is rate-limited yet.
 
 - **Network-level anonymity** — peers' IP addresses are visible to peers they
   connect to.
-- **A paid storage market / automatic peer discovery** — you name storage peers
-  explicitly.
+- **A paid storage market** — nodes can be *discovered* (`publish --open` via the
+  rendezvous tag) and ranked by reputation, but there is no pricing/payment/
+  contract layer.
 - **Costly identities / global consensus reputation** — kept local and
   Sybil-isolated instead.
 

@@ -81,6 +81,11 @@ func (n *Node) Addrs() []string {
 	return out
 }
 
+// ConnectInfo connects to a peer given its discovered address info.
+func (n *Node) ConnectInfo(ctx context.Context, ai peer.AddrInfo) error {
+	return n.host.Connect(ctx, ai)
+}
+
 // Connect dials a peer given a full multiaddr (…/p2p/<id>).
 func (n *Node) Connect(ctx context.Context, addr string) (peer.ID, error) {
 	ma, err := multiaddr.NewMultiaddr(addr)

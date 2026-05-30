@@ -235,10 +235,13 @@ own — the signed head endorses its content address, and the fetcher verifies t
 
 `publish` gathers a snapshot's object closure (`repo.PublishSet`: snapshot bytes + every
 reachable DAG node + chunk), **erasure-codes** it (below), and spreads the resulting shards
-round-robin across the chosen peers — named explicitly with `--peer`, and/or every trusted
-peer found online via the DHT with `--trusted` (`PeerIDFromPubKeyHex` + `DialPeerID`). Since
-the coding only helps across enough *distinct* peers, it reports the fault tolerance and
-`--min-peers` guards thin configurations. It then fetches the current account manifest,
+round-robin across the chosen peers, from three sources: `--peer` (explicit multiaddrs),
+`--trusted` (every trusted key found online via the DHT — `PeerIDFromPubKeyHex` +
+`DialPeerID`), and `--open` (untrusted nodes discovered through a **storage-offer rendezvous
+tag** that `serve` advertises — `FindStorageProviders`, then ranked by reputation with
+Bad/Blocked excluded and capped at `--open-peers`). Since the coding only helps across
+enough *distinct* peers, it reports the fault tolerance and `--min-peers` guards thin
+configurations. It then fetches the current account manifest,
 upserts this repo's
 entry (replacing it by `repoID`, never clobbering siblings), pushes the new Release + the
 new manifest to every peer, and points the head at the manifest. `net-restore` resolves the
@@ -327,9 +330,9 @@ explicitly marked out of scope:
   `internal/accounting`, audit protocol; see "Durability" above).
 - **Erasure-coded redundancy** — ✅ *implemented* (`internal/shard` Reed-Solomon +
   `internal/pack`; see "Durability" above).
-- **Automatic peer selection / storage market** — *not built.* You name storage peers
-  explicitly (filtered by trust + reputation); discovering who offers storage is a
-  marketplace concern, deliberately out of scope.
+- **Storage market** — *not built.* Nodes can be discovered (`publish --open` via the
+  rendezvous tag) and ranked by reputation, but there is no pricing/payment/contract layer;
+  a paid market remains deliberately out of scope.
 - **Network-level anonymity** (hiding IPs via onion/mixnet routing) — *out of scope.*
 
 ### Disaster recovery — rebuild from the network with no local state

@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"time"
@@ -11,6 +12,27 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multihash"
 )
+
+// storageOfferTag is the well-known rendezvous key under which nodes willing to
+// host strangers' data advertise themselves, so publishers using `--open` can
+// discover them without knowing their addresses in advance.
+const storageOfferTag = "hidage/storage-offer/v1"
+
+func offerCID() cid.Cid {
+	sum := sha256.Sum256([]byte(storageOfferTag))
+	mh, _ := multihash.Encode(sum[:], multihash.SHA2_256)
+	return cid.NewCidV1(cid.Raw, mh)
+}
+
+// AdvertiseStorage announces, via the DHT, that this node offers storage.
+func (n *Node) AdvertiseStorage(ctx context.Context) error {
+	return n.dht.Provide(ctx, offerCID(), true)
+}
+
+// FindStorageProviders returns nodes that have advertised storage.
+func (n *Node) FindStorageProviders(ctx context.Context) ([]peer.AddrInfo, error) {
+	return n.dht.FindProviders(ctx, offerCID())
+}
 
 // WaitForPeers blocks until the DHT routing table holds at least min peers, or
 // the timeout/ctx elapses. Record puts/gets are unreliable until the table is
