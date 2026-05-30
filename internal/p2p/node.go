@@ -100,6 +100,20 @@ func (n *Node) Connect(ctx context.Context, addr string) (peer.ID, error) {
 // Close shuts the host down.
 func (n *Node) Close() error { return n.host.Close() }
 
+// PeerIDFromPubKeyHex derives a libp2p peer ID from a hex Ed25519 public key
+// (the format the trust store uses), so a trusted key can be located on the DHT.
+func PeerIDFromPubKeyHex(h string) (peer.ID, error) {
+	raw, err := hex.DecodeString(h)
+	if err != nil {
+		return "", err
+	}
+	pub, err := crypto.UnmarshalEd25519PublicKey(raw)
+	if err != nil {
+		return "", err
+	}
+	return peer.IDFromPublicKey(pub)
+}
+
 // PeerPubKeyHex returns the hex Ed25519 public key for a peer ID (the key is
 // inlined in the ID), matching the format used by the trust and reputation stores.
 func PeerPubKeyHex(id peer.ID) (string, error) {

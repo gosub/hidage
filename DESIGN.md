@@ -235,7 +235,11 @@ own — the signed head endorses its content address, and the fetcher verifies t
 
 `publish` gathers a snapshot's object closure (`repo.PublishSet`: snapshot bytes + every
 reachable DAG node + chunk), **erasure-codes** it (below), and spreads the resulting shards
-across trusted peers. It then fetches the current account manifest, upserts this repo's
+round-robin across the chosen peers — named explicitly with `--peer`, and/or every trusted
+peer found online via the DHT with `--trusted` (`PeerIDFromPubKeyHex` + `DialPeerID`). Since
+the coding only helps across enough *distinct* peers, it reports the fault tolerance and
+`--min-peers` guards thin configurations. It then fetches the current account manifest,
+upserts this repo's
 entry (replacing it by `repoID`, never clobbering siblings), pushes the new Release + the
 new manifest to every peer, and points the head at the manifest. `net-restore` resolves the
 head → fetches + verifies the manifest → selects a backup (`--repo <name>` / `--all` / the

@@ -83,8 +83,10 @@ hidage trust list                 # show trusted / blocked keys
 hidage serve --listen /ip4/0.0.0.0/tcp/4001   # run a node: join the DHT, serve objects,
                                               #   accept pushes within trust + space budget;
                                               #   --lease H reclaims un-renewed hosted shards
-hidage publish --peer <addr> --redundancy 3   # erasure-code the latest snapshot, spread
-                                              #   shards across peers, update the account head
+hidage publish --trusted --redundancy 3       # erasure-code the latest snapshot and spread
+                                              #   shards across every trusted peer found online
+hidage publish --peer <addr> --min-peers 3    # …or name peers explicitly; --min-peers guards
+                                              #   against too few for the redundancy to matter
 hidage net-list --bootstrap <addr>            # list all folders you've published
 hidage net-restore ./out --all --bootstrap <addr>   # recover from the network: resolve the
                                               #   account, gather K-of-M shards, rebuild, restore
@@ -193,9 +195,11 @@ peers, one killed, full byte-identical recovery from the survivors).
 > See [`THREAT_MODEL.md`](THREAT_MODEL.md) for the full adversarial analysis.
 
 
-- **Manual peer selection** — you still name storage peers with `--peer` (filtered by
-  trust + reputation); automatic discovery of who's offering storage isn't built (a
-  storage-offer/marketplace layer, which remains out of scope — see the roadmap note).
+- **Peer selection** — `publish --trusted` automatically spreads to every trusted peer
+  found online (the friend-to-friend mode); otherwise you name peers with `--peer`. Open
+  *discovery* of untrusted nodes offering storage isn't built yet (a rendezvous + ranking
+  layer). Erasure coding only helps across enough distinct peers, so `--min-peers` guards
+  against (and a single-peer publish warns about) configurations with no fault tolerance.
 - **Pseudonymous, not IP-anonymous** — peers are identified by public key, but their IP
   addresses are visible to peers they connect to (network-level anonymity is out of scope).
 - **Single-writer** — snapshots assume one owner per repository; concurrent writers from

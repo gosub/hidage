@@ -153,6 +153,8 @@ func gcLoop(ctx context.Context, blobs *store.KeyedStore, lease time.Duration) {
 func newPublishCmd() *cobra.Command {
 	var bootstrap, peers []string
 	var redundancy float64
+	var useTrusted bool
+	var minPeers int
 	cmd := &cobra.Command{
 		Use:   "publish",
 		Short: "Erasure-code the latest snapshot, spread shards across peers, publish the head",
@@ -240,24 +242,62 @@ func newPublishCmd() *cobra.Command {
 				return err
 			}
 
-			// Filter peers by trust + reputation, then spread the shards across
-			// the survivors so losing a minority of them still leaves K per pack.
+			if len(peers) == 0 && !useTrusted {
+				return fmt.Errorf("specify storage peers with --peer <addr> and/or --trusted")
+			}
+
+			// Collect candidate peers: explicit --peer multiaddrs, plus (with
+			// --trusted) every trusted key located online via the DHT.
+			seen := map[peer.ID]bool{}
 			var accepted []peerID
+			add := func(pid peer.ID) {
+				if seen[pid] || pid == node.ID() {
+					return
+				}
+				seen[pid] = true
+				pubHex, _ := p2p.PeerPubKeyHex(pid)
+				if pubHex != "" && !acceptablePeer(policy, rep, pubHex) {
+					fmt.Printf("  %s: skipped (blocked or low reputation)\n", pid)
+					return
+				}
+				accepted = append(accepted, peerID{id: pid, pubHex: pubHex})
+			}
 			for _, addr := range peers {
 				pid, err := node.Connect(ctx, addr)
 				if err != nil {
 					fmt.Printf("  %s: %v\n", addr, err)
 					continue
 				}
-				pubHex, _ := p2p.PeerPubKeyHex(pid)
-				if pubHex != "" && !acceptablePeer(policy, rep, pubHex) {
-					fmt.Printf("  %s: skipped (blocked or low reputation)\n", pid)
-					continue
+				add(pid)
+			}
+			if useTrusted {
+				trusted, _ := policy.List()
+				for _, pubHex := range trusted {
+					pid, err := p2p.PeerIDFromPubKeyHex(pubHex)
+					if err != nil {
+						continue
+					}
+					if err := node.DialPeerID(ctx, pid); err != nil {
+						fmt.Printf("  %s: trusted peer unreachable (%v)\n", pid, err)
+						continue
+					}
+					add(pid)
 				}
-				accepted = append(accepted, peerID{id: pid, pubHex: pubHex})
 			}
 			if len(accepted) == 0 {
-				return fmt.Errorf("no acceptable peers to publish to")
+				return fmt.Errorf("no acceptable peers reachable to publish to")
+			}
+			if len(accepted) < minPeers {
+				return fmt.Errorf("only %d acceptable peer(s) reachable, need at least --min-peers=%d", len(accepted), minPeers)
+			}
+			// Erasure coding only helps if shards land on enough distinct peers.
+			tolerate := int(float64(len(accepted)) * (1 - 1/redundancy))
+			if tolerate == 0 {
+				fmt.Printf("WARNING: %d peer(s) at %.1fx redundancy gives no fault tolerance "+
+					"(losing one peer loses the backup); use more peers or higher --redundancy.\n",
+					len(accepted), redundancy)
+			} else {
+				fmt.Printf("Spreading across %d peers; tolerates losing up to %d.\n", len(accepted), tolerate)
 			}
 
 			common := map[string][]byte{relID: relBytes, manifestID: manifestBytes}
@@ -298,6 +338,8 @@ func newPublishCmd() *cobra.Command {
 	}
 	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
 	cmd.Flags().StringArrayVar(&peers, "peer", nil, "storage peer multiaddr(s) to push to")
+	cmd.Flags().BoolVar(&useTrusted, "trusted", false, "also push to every trusted peer found online (see `hidage trust`)")
+	cmd.Flags().IntVar(&minPeers, "min-peers", 1, "fail unless at least this many acceptable peers are reachable")
 	cmd.Flags().Float64Var(&redundancy, "redundancy", 2.0, "shards to emit per shard needed (e.g. 2.0 tolerates losing half)")
 	return cmd
 }
