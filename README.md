@@ -83,9 +83,11 @@ hidage trust list                 # show trusted / blocked keys
 hidage serve --listen /ip4/0.0.0.0/tcp/4001   # run a node: join the DHT, serve objects,
                                               #   accept pushes within trust + space budget
 hidage publish --peer <addr> --redundancy 3   # erasure-code the latest snapshot, spread
-                                              #   shards across peers, publish a signed head
-hidage net-restore ./out --bootstrap <addr>   # recover from the network: resolve head,
-                                              #   gather K-of-M shards, rebuild, restore
+                                              #   shards across peers, update the account head
+hidage net-list --bootstrap <addr>            # list all folders you've published
+hidage net-restore ./out --all --bootstrap <addr>   # recover from the network: resolve the
+                                              #   account, gather K-of-M shards, rebuild, restore
+                                              #   (--repo <name> for just one)
 
 # reputation, audits, accounting
 hidage audit --peer <addr>        # challenge peers to prove they hold your shards
@@ -153,16 +155,16 @@ repository end to end — snapshot/restore,
 `.hidage` exclusion, incremental-delta accounting, history/diff, `--replace`, and
 forget + prune. Networking: two-node object transfer, DHT provide/discover, push gated by
 trust, signed head publish/resolve, proof-of-storage audits, reputation scoring, space
-accounting, Reed-Solomon encode/decode (incl. decode from any K subset), pack
-build/reassemble below and above the shard threshold, a **cross-node recovery** test, and
-the **redundant-recovery** test (shards spread over 3 peers, one killed, full byte-
-identical recovery from the survivors).
+accounting, the account manifest (upsert/find/roundtrip), Reed-Solomon encode/decode (incl.
+decode from any K subset), pack build/reassemble below and above the shard threshold, a
+**cross-node recovery** test, and the **redundant-recovery** test (shards spread over 3
+peers, one killed, full byte-identical recovery from the survivors).
 
 ## Project layout
 
 | Path | Responsibility |
 |---|---|
-| `cmd/hidage` | CLI: snapshot/restore/diff/prune, recovery-code/recover, trust, serve/publish/net-restore, audit/reputation/accounting |
+| `cmd/hidage` | CLI: snapshot/restore/diff/prune, recovery-code/recover, trust, serve/publish/net-restore/net-list, audit/reputation/accounting |
 | `internal/config` | config + data-store path resolution (`HIDAGE_STORE`) |
 | `internal/keyring` | root secret (wrapped under passphrase) → master key + identity; BIP39 recovery code |
 | `internal/identity` | Ed25519 keypair derived from the keyring (libp2p peer key) |
@@ -174,6 +176,7 @@ identical recovery from the survivors).
 | `internal/chunk` | content-defined chunking (FastCDC) |
 | `internal/dag` | Merkle DAG: chunk/file/tree nodes (meta store) routed apart from chunk data |
 | `internal/repo` | versioned repository: `.hidage` layout, snapshots, restore, diff, prune, publish-set |
+| `internal/account` | account manifest: one identity's index of all its network backups |
 | `internal/shard` | Reed-Solomon erasure coding (`klauspost/reedsolomon`): any K of M shards reconstruct |
 | `internal/pack` | group objects into packs, erasure-code them, Release descriptor for reassembly |
 | `internal/p2p` | libp2p host (peer key = identity); object/push/audit protocols, Kademlia DHT, signed head pointers |

@@ -223,16 +223,26 @@ the same peer ID as the original). It speaks three things:
   public key and consults its **trust policy** (store unless `Blocked`), then re-announces
   what it stored to the DHT.
 - **Kademlia DHT** (`/hidage` prefix) — `Provide`/`FindProviders` map an object's content
-  address (a raw CIDv1 over its SHA-256) to the peers holding it, and **signed head
-  pointers** (`/hidage/<ownerpubkey>` → latest snapshot id) let a peer find an owner's
-  current snapshot with no local state. A namespaced record validator verifies the head
-  signature on put and get and selects the newest.
+  address (a raw CIDv1 over its SHA-256) to the peers holding it, and a **signed head
+  pointer** (`/hidage/<ownerpubkey>` → an **account-manifest** content address) lets a peer
+  find *all* of an owner's backups with no local state. A namespaced record validator
+  verifies the head signature on put and get and selects the newest.
+
+An owner can back up many folders under one identity, so the head doesn't name a single
+backup — it names an **account manifest** (`internal/account`): a small object listing one
+entry per repository (`repoID`, name, current Release id). It needs no signature of its
+own — the signed head endorses its content address, and the fetcher verifies that address.
 
 `publish` gathers a snapshot's object closure (`repo.PublishSet`: snapshot bytes + every
-reachable DAG node + chunk), **erasure-codes** it (below), spreads the resulting shards
-across trusted peers, and posts a head pointer to the **Release** descriptor. `net-restore`
-resolves the head, fetches the Release, gathers K-of-M shards per pack from whoever still
-has them, rebuilds the objects, and runs the ordinary restore walk against a local cache.
+reachable DAG node + chunk), **erasure-codes** it (below), and spreads the resulting shards
+across trusted peers. It then fetches the current account manifest, upserts this repo's
+entry (replacing it by `repoID`, never clobbering siblings), pushes the new Release + the
+new manifest to every peer, and points the head at the manifest. `net-restore` resolves the
+head → fetches + verifies the manifest → selects a backup (`--repo <name>` / `--all` / the
+sole entry) → fetches that Release, gathers K-of-M shards per pack from whoever still has
+them, rebuilds the objects, and runs the ordinary restore walk against a local cache.
+(`net-list` just prints the manifest.) Resolving and publishing wait for the DHT routing
+table to populate (`WaitForPeers`) so a republish never reads a stale/empty manifest.
 
 ---
 
@@ -324,10 +334,11 @@ The three things this needs — all now in place:
    single 32-byte root, exportable as a 24-word BIP39 phrase (`recovery-code`) and
    restorable with `recover`.
 
-3. **Find the latest snapshot with zero local state.** ✅ An IPNS-style **signed head
-   pointer** in the DHT, keyed by the owner's public key (`pubkey → latest snapshot id`,
-   signed by the identity key), posted on `publish`. Recovery needs only the identity
-   (from the recovery code) to locate the head — no snapshot id to remember.
+3. **Find all backups with zero local state.** ✅ An IPNS-style **signed head pointer** in
+   the DHT, keyed by the owner's public key (`pubkey → account-manifest id`, signed by the
+   identity key), posted on `publish`. Recovery needs only the identity (from the recovery
+   code) to locate the head, and the manifest enumerates every repository — no snapshot or
+   repo id to remember.
 
 **Minimal recovery seed.** Recovering an arbitrarily large dataset needs only a tiny
 off-machine secret plus a way onto the network: the **24-word recovery phrase** (which
