@@ -281,7 +281,10 @@ These keep distributed data recoverable and keep peers honest.
 
 ---
 
-## What's deliberately deferred
+## Beyond the storage core — status & scope
+
+Everything originally deferred past the local storage core is now built, except where
+explicitly marked out of scope:
 
 - **Networking** — ✅ *implemented* (`internal/p2p`, `internal/netstore`, see above):
   libp2p host, object/push protocols, Kademlia DHT, signed head pointers.

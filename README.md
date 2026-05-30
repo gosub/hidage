@@ -51,7 +51,7 @@ files ─FastCDC chunk─▶ chunks ─encrypt─▶ Merkle DAG (file + tree nod
 
 > **Want the real internals?** [`DESIGN.md`](DESIGN.md) details the key hierarchy, the
 > deterministic AEAD scheme, the DAG node formats, snapshot signing/history, and the
-> prune/GC algorithm — plus the threat model and what's deferred to later phases.
+> prune/GC algorithm — plus the threat model and what's deliberately out of scope.
 
 ## Build
 
