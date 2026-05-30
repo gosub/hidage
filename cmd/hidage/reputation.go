@@ -2,16 +2,24 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math/rand"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"hidage/internal/accounting"
 	"hidage/internal/config"
 	"hidage/internal/p2p"
+	"hidage/internal/pack"
 	"hidage/internal/repo"
 	"hidage/internal/reputation"
+	"hidage/internal/store"
 )
+
+// auditSample is how many of a peer's shards to challenge per audit run.
+const auditSample = 4
 
 func newReputationCmd() *cobra.Command {
 	return &cobra.Command{
@@ -46,7 +54,7 @@ func newAuditCmd() *cobra.Command {
 	var peers []string
 	cmd := &cobra.Command{
 		Use:   "audit",
-		Short: "Audit storage peers for the latest snapshot's objects; update reputation",
+		Short: "Challenge storage peers to prove they hold your shards; update reputation + accounting",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kr, err := unlock()
@@ -65,6 +73,13 @@ func newAuditCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			dist, err := readDistribution(r.HidageFile("distribution.json"))
+			if err != nil {
+				return fmt.Errorf("nothing published from this repo yet; run `hidage publish` first")
+			}
+
+			// Regenerate the published shards deterministically so we know the
+			// exact bytes each peer should be able to prove it holds.
 			snap, err := r.Latest()
 			if err != nil || snap == nil {
 				return fmt.Errorf("no snapshot to audit")
@@ -73,7 +88,20 @@ func newAuditCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			rel, shardBlobs, err := pack.Build(objs, dist.Redundancy, snap.ID)
+			if err != nil {
+				return err
+			}
+			relBytes, _ := json.Marshal(rel)
+			if store.ID(relBytes) != dist.ReleaseID {
+				return fmt.Errorf("the snapshot changed since it was published; re-publish before auditing")
+			}
+
 			rep, err := reputation.Load(paths.ReputationPath)
+			if err != nil {
+				return err
+			}
+			ledger, err := accounting.Load(paths.AccountingPath)
 			if err != nil {
 				return err
 			}
@@ -98,23 +126,30 @@ func newAuditCmd() *cobra.Command {
 					fmt.Printf("  %s: %v\n", addr, err)
 					continue
 				}
-				pass, total := 0, 0
-				for id, want := range objs {
-					total++
-					rec, err := node.Audit(ctx, pid, id, want)
+				pubHex, _ := p2p.PeerPubKeyHex(pid)
+				shardIDs := dist.Peers[pubHex]
+				if len(shardIDs) == 0 {
+					fmt.Printf("  %s: no shards assigned to this peer\n", pid)
+					continue
+				}
+				sample := sampleShards(shardIDs, auditSample)
+				pass := 0
+				for _, id := range sample {
+					rec, err := node.Audit(ctx, pid, id, shardBlobs[id])
 					if err == nil && rec.OK {
 						pass++
 					}
 				}
-				ok := pass == total
-				pubHex, _ := p2p.PeerPubKeyHex(pid)
+				ok := pass == len(sample)
 				rep.Record(pubHex, ok)
-				verdict := "PASS"
+				verdict, note := "PASS", ""
 				if !ok {
 					verdict = "FAIL"
+					note = ", storage credit revoked"
+					ledger.RevokeTheyStoreForUs(pubHex) // it dropped our data; revoke its credit
 				}
-				fmt.Printf("  %s: %d/%d objects verified → %s (score %.2f)\n",
-					pid, pass, total, verdict, rep.Score(pubHex))
+				fmt.Printf("  %s: %d/%d sampled shards verified → %s (score %.2f)%s\n",
+					pid, pass, len(sample), verdict, rep.Score(pubHex), note)
 			}
 			return nil
 		},
@@ -122,4 +157,14 @@ func newAuditCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
 	cmd.Flags().StringArrayVar(&peers, "peer", nil, "storage peer multiaddr(s) to audit")
 	return cmd
+}
+
+// sampleShards returns up to n randomly-chosen shard ids.
+func sampleShards(ids []string, n int) []string {
+	if len(ids) <= n {
+		return ids
+	}
+	cp := append([]string(nil), ids...)
+	rand.Shuffle(len(cp), func(i, j int) { cp[i], cp[j] = cp[j], cp[i] })
+	return cp[:n]
 }

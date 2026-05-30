@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"sort"
 
 	"hidage/internal/shard"
 )
@@ -99,11 +100,21 @@ func Reassemble(rel *Release, get func(id string) ([]byte, error)) (map[string][
 }
 
 // groupBySize greedily bins object ids into groups no larger than max bytes.
+// Ids are sorted first so Build is deterministic: the same objects always yield
+// the same packs and therefore the same shard ids, which lets a republish renew
+// existing shards (and their storage leases) instead of producing new ones.
 func groupBySize(objects map[string][]byte, max int) [][]string {
+	ids := make([]string, 0, len(objects))
+	for id := range objects {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
 	var groups [][]string
 	var cur []string
 	var size int
-	for id, data := range objects {
+	for _, id := range ids {
+		data := objects[id]
 		if size > 0 && size+len(data) > max {
 			groups = append(groups, cur)
 			cur, size = nil, 0

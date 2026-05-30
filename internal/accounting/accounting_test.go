@@ -44,6 +44,20 @@ func TestOverBudgetAfterStoring(t *testing.T) {
 	}
 }
 
+func TestRevokeShrinksBudget(t *testing.T) {
+	l, _ := Load(filepath.Join(t.TempDir(), "acct.json"))
+	ratio, free := 3.0, int64(0)
+	l.AddTheyStoreForUs(peer, 100)
+	if !l.Allow(peer, 300, ratio, free) {
+		t.Fatal("with 100 reciprocated and ratio 3, budget should be 300")
+	}
+	// A failed audit revokes the credit: budget collapses to the free quota (0).
+	l.RevokeTheyStoreForUs(peer)
+	if l.Allow(peer, 1, ratio, free) {
+		t.Fatal("after revoke, the peer should have no budget")
+	}
+}
+
 func TestPersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "acct.json")
 	l, _ := Load(path)

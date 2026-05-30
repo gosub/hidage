@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // KeyedStore is a blob store addressed by an externally-supplied id rather than
@@ -64,6 +65,34 @@ func (s *KeyedStore) Has(id string) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+// Reap deletes objects whose last-modified time is older than maxAge, returning
+// the count removed. This implements storage leases for hosted data: a push
+// rewrites (and so renews) an object's mtime, so data an owner stops renewing
+// eventually expires and is reclaimed.
+func (s *KeyedStore) Reap(maxAge time.Duration) (int, error) {
+	cutoff := time.Now().Add(-maxAge)
+	deleted := 0
+	err := filepath.WalkDir(s.root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil // racing deletion; skip
+		}
+		if info.ModTime().Before(cutoff) {
+			if err := os.Remove(p); err == nil {
+				deleted++
+			}
+		}
+		return nil
+	})
+	return deleted, err
 }
 
 // List returns all stored ids.

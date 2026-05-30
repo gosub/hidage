@@ -28,6 +28,12 @@ const AuditProtocol = "/hidage/audit/1.0.0"
 
 const nonceSize = 32
 
+// auditDeadline bounds how long a holder may take to answer a challenge. An
+// honest holder reads the object from local disk and hashes it (fast); a lazy
+// one trying to fetch it from another peer first should exceed this. It's a soft
+// defense — tiny objects can still be outsourced within the window.
+const auditDeadline = 5 * time.Second
+
 // Receipt is the challenger's record of one audit.
 type Receipt struct {
 	Peer      peer.ID
@@ -103,6 +109,7 @@ func (n *Node) Audit(ctx context.Context, p peer.ID, objectID string, expected [
 	if cw, ok := s.(interface{ CloseWrite() error }); ok {
 		cw.CloseWrite()
 	}
+	s.SetReadDeadline(time.Now().Add(auditDeadline)) // bound the response time
 
 	rec := &Receipt{Peer: p, ObjectID: objectID, Nonce: nonce, CreatedAt: time.Now().UTC()}
 

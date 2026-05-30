@@ -55,6 +55,7 @@ func newServeCmd() *cobra.Command {
 	var bootstrap []string
 	var ratio float64
 	var freeMiB int64
+	var leaseHours int
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run a node: serve objects, accept pushes from trusted peers, join the DHT",
@@ -105,6 +106,7 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 			go reprovide(ctx, node, pub)
+			go gcLoop(ctx, pub, time.Duration(leaseHours)*time.Hour)
 
 			fmt.Println("hidage node listening; addresses:")
 			for _, a := range node.Addrs() {
@@ -119,7 +121,33 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
 	cmd.Flags().Float64Var(&ratio, "ratio", accounting.DefaultRatio, "max bytes stored per peer per byte they store for us")
 	cmd.Flags().Int64Var(&freeMiB, "free", accounting.DefaultFreeQuota>>20, "free quota per peer, in MiB (no reciprocation required)")
+	cmd.Flags().IntVar(&leaseHours, "lease", 168, "hosted-shard lease in hours; data not renewed (re-published) within this is reclaimed")
 	return cmd
+}
+
+// gcLoop periodically reclaims hosted objects whose storage lease has lapsed
+// (they were not renewed by a re-publish within the lease window).
+func gcLoop(ctx context.Context, blobs *store.KeyedStore, lease time.Duration) {
+	reap := func() {
+		if n, err := blobs.Reap(lease); err == nil && n > 0 {
+			fmt.Printf("[gc] reclaimed %d expired hosted objects\n", n)
+		}
+	}
+	reap()
+	interval := lease / 12
+	if interval < time.Minute {
+		interval = time.Minute
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			reap()
+		}
+	}
 }
 
 func newPublishCmd() *cobra.Command {
@@ -234,11 +262,16 @@ func newPublishCmd() *cobra.Command {
 
 			common := map[string][]byte{relID: relBytes, manifestID: manifestBytes}
 			assignments := spreadShards(shardBlobs, common, len(accepted))
+			dist := distribution{ReleaseID: relID, Redundancy: redundancy, Peers: map[string][]string{}}
 			for i, p := range accepted {
 				push := assignments[i]
 				var bytes int64
-				for _, d := range push {
+				var shardIDs []string
+				for id, d := range push {
 					bytes += int64(len(d))
+					if _, isShard := shardBlobs[id]; isShard {
+						shardIDs = append(shardIDs, id)
+					}
 				}
 				stored, err := node.PushObjects(ctx, p.id, push)
 				if err != nil {
@@ -247,8 +280,12 @@ func newPublishCmd() *cobra.Command {
 				}
 				if stored == len(push) && p.pubHex != "" {
 					ledger.AddTheyStoreForUs(p.pubHex, bytes)
+					dist.Peers[p.pubHex] = shardIDs // remember what to audit them for
 				}
 				fmt.Printf("  %s: stored %d shards (%d bytes)\n", p.id, stored, bytes)
+			}
+			if err := writeDistribution(r.HidageFile("distribution.json"), dist); err != nil {
+				return err
 			}
 			if err := node.PutHead(ctx, kr.Identity(), manifestID); err != nil {
 				return fmt.Errorf("publish head: %w", err)
@@ -268,6 +305,31 @@ func newPublishCmd() *cobra.Command {
 type peerID struct {
 	id     peer.ID
 	pubHex string
+}
+
+// distribution records which shards of the latest release went to which peer, so
+// audit can later challenge each peer for exactly the shards it agreed to hold.
+type distribution struct {
+	ReleaseID  string              `json:"releaseID"`
+	Redundancy float64             `json:"redundancy"`
+	Peers      map[string][]string `json:"peers"` // peer pubkey hex -> shard ids
+}
+
+func writeDistribution(path string, d distribution) error {
+	data, err := json.MarshalIndent(d, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func readDistribution(path string) (distribution, error) {
+	var d distribution
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return d, err
+	}
+	return d, json.Unmarshal(data, &d)
 }
 
 // spreadShards assigns shard blobs round-robin across n peers, and gives the

@@ -105,3 +105,27 @@ var errMissing = errMissingType{}
 type errMissingType struct{}
 
 func (errMissingType) Error() string { return "missing" }
+
+func TestBuildIsDeterministic(t *testing.T) {
+	objs := sampleObjects()
+	r1, b1, err := Build(objs, 2.0, "snap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, b2, err := Build(objs, 2.0, "snap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b1) != len(b2) {
+		t.Fatalf("shard set sizes differ: %d vs %d", len(b1), len(b2))
+	}
+	// Same shard ids both times -> a republish renews the same shards/leases.
+	for id := range b1 {
+		if _, ok := b2[id]; !ok {
+			t.Fatalf("shard %s present in first build but not second", id)
+		}
+	}
+	if len(r1.Packs) != len(r2.Packs) {
+		t.Fatalf("pack counts differ: %d vs %d", len(r1.Packs), len(r2.Packs))
+	}
+}

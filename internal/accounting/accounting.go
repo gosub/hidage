@@ -89,6 +89,18 @@ func (l *Ledger) AddTheyStoreForUs(pub string, n int64) error {
 	return l.save()
 }
 
+// RevokeTheyStoreForUs zeroes the credit a peer earned for storing our data —
+// used when an audit proves the peer no longer holds it. This shrinks the peer's
+// own storage budget with us, so accepting-then-deleting our data costs it.
+func (l *Ledger) RevokeTheyStoreForUs(pub string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e := l.peers[pub]; e != nil {
+		e.TheyStoreForUs = 0
+	}
+	return l.save()
+}
+
 // Entry is one peer's accounting, for listing.
 type Entry struct {
 	PubKey         string

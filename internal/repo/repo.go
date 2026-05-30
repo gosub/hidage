@@ -42,6 +42,12 @@ type Repo struct {
 // RepoID returns this repository's stable identifier (from .hidage/config.json).
 func (r *Repo) RepoID() string { return r.repoID }
 
+// HidageFile returns the path of an auxiliary file inside this repo's .hidage/
+// directory (e.g. the distribution record written by publish).
+func (r *Repo) HidageFile(name string) string {
+	return filepath.Join(r.Folder, hidageDir, name)
+}
+
 func metaDir(folder string) string    { return filepath.Join(folder, hidageDir, "objects") }
 func snapsDir(folder string) string   { return filepath.Join(folder, hidageDir, "snapshots") }
 func configPath(folder string) string { return filepath.Join(folder, hidageDir, "config.json") }
