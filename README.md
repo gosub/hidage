@@ -13,8 +13,7 @@ reputation ledger tracks which hosts are reliable.
 > reconstruct, so it survives losing a minority); peers are kept honest by **proof-of-
 > storage audits** feeding a **reputation** score, and a **space-accounting** ledger
 > enforces the contribute-more-than-you-consume model. A backup is recoverable on a fresh
-> machine from just the **recovery phrase + one bootstrap peer**. Still to come: IP-level
-> anonymity (see [Roadmap](#roadmap)).
+> machine from just the **recovery phrase + one bootstrap peer**.
 
 ## How it works
 
@@ -185,8 +184,8 @@ identical recovery from the survivors).
 - **Manual peer selection** — you still name storage peers with `--peer` (filtered by
   trust + reputation); automatic discovery of who's offering storage isn't built (a
   storage-offer/marketplace layer, which remains out of scope — see the roadmap note).
-- **Pseudonymous, not IP-anonymous** — peers are identified by public key; IP-level
-  anonymity is a later phase.
+- **Pseudonymous, not IP-anonymous** — peers are identified by public key, but their IP
+  addresses are visible to peers they connect to (network-level anonymity is out of scope).
 - **Single-writer** — snapshots assume one owner per repository; concurrent writers from
   multiple devices (conflict resolution) are not handled.
 - **No at-rest forward secrecy** — a leaked user master key decrypts every snapshot in
@@ -212,7 +211,6 @@ identical recovery from the survivors).
   score; a **space-accounting** ledger enforces the 2–4× contribution ratio on accepted
   pushes; and a snapshot is **erasure-coded** (`internal/pack` + Reed-Solomon) into shards
   spread across peers, so it survives the loss of any minority of them.
-- **Phase 5 — anonymity routing.** Optional Tor / Veilid transport to hide IPs.
 
 > A paid storage service is **only an idea, not a planned feature.** The chosen
 > primitives (signed pubkey identities + trust policy, content-addressed verifiable

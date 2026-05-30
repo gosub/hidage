@@ -274,8 +274,8 @@ These keep distributed data recoverable and keep peers honest.
 - **Integrity:** content addressing (SHA-256) detects object corruption; AEAD tags detect
   tampering; the Merkle root binds the whole tree; snapshots are Ed25519-signed by the
   owner.
-- **Anonymity:** *pseudonymous only* — peers are identified by public key. IP-level
-  anonymity is a later phase.
+- **Anonymity:** *pseudonymous only* — peers are identified by public key; their IP
+  addresses are visible to peers they connect to (network-level anonymity is out of scope).
 - **Not yet covered:** at-rest forward secrecy (a leaked master key decrypts all snapshots
   in that repository); multi-writer concurrency (snapshots assume a single owner).
 
@@ -296,7 +296,7 @@ These keep distributed data recoverable and keep peers honest.
 - **Automatic peer selection / storage market** — *not built.* You name storage peers
   explicitly (filtered by trust + reputation); discovering who offers storage is a
   marketplace concern, deliberately out of scope.
-- **Anonymity routing** — optional Tor / Veilid transport. *(planned, Phase 5)*
+- **Network-level anonymity** (hiding IPs via onion/mixnet routing) — *out of scope.*
 
 ### Disaster recovery — rebuild from the network with no local state
 
