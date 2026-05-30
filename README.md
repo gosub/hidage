@@ -81,7 +81,8 @@ hidage trust list                 # show trusted / blocked keys
 
 # networking
 hidage serve --listen /ip4/0.0.0.0/tcp/4001   # run a node: join the DHT, serve objects,
-                                              #   accept pushes within trust + space budget
+                                              #   accept pushes within trust + space budget;
+                                              #   --lease H reclaims un-renewed hosted shards
 hidage publish --peer <addr> --redundancy 3   # erasure-code the latest snapshot, spread
                                               #   shards across peers, update the account head
 hidage net-list --bootstrap <addr>            # list all folders you've published
@@ -91,6 +92,7 @@ hidage net-restore ./out --all --bootstrap <addr>   # recover from the network: 
 
 # reputation, audits, accounting
 hidage audit --peer <addr>        # challenge peers to prove they hold your shards
+                                  #   (updates reputation; revokes credit on failure)
 hidage reputation                 # per-peer audit pass/fail scores
 hidage accounting                 # bytes you store for peers vs. they store for you
 ```
@@ -183,6 +185,12 @@ peers, one killed, full byte-identical recovery from the survivors).
 | `internal/netstore` | network-backed object source (DHT discover + fetch) for restoring from peers |
 
 ## Known limitations
+
+> **Security & incentives:** confidentiality and integrity are cryptographic and strong;
+> the storage *economy* (free-rider/Sybil resistance, audit guarantees) is best-effort on
+> the open network and robust mainly in the **friend-to-friend (trusted-peer)** regime.
+> See [`THREAT_MODEL.md`](THREAT_MODEL.md) for the full adversarial analysis.
+
 
 - **Manual peer selection** — you still name storage peers with `--peer` (filtered by
   trust + reputation); automatic discovery of who's offering storage isn't built (a

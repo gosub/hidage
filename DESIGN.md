@@ -251,21 +251,32 @@ table to populate (`WaitForPeers`) so a republish never reads a stale/empty mani
 These keep distributed data recoverable and keep peers honest.
 
 - **Proof-of-storage audits** (`/hidage/audit/1.0.0`, `internal/p2p`) — a node that holds
-  the original challenges a peer with an object id + fresh random nonce; the peer must
-  return `SHA-256(nonce || objectBytes)` (only computable with the bytes), signed by its
-  identity. The challenger verifies the proof against its own copy and the signature,
-  producing a verifiable pass/fail **receipt**.
+  the original challenges a peer with a shard id + fresh random nonce; the peer must return
+  `SHA-256(nonce || shardBytes)` (only computable with the bytes), signed by its identity,
+  within a short response **deadline** (a soft defense against fetching the shard from
+  elsewhere on demand). The challenger verifies the proof and signature. `publish` records
+  which shards went to which peer (`.hidage/distribution.json`); `audit` regenerates the
+  shards deterministically and samples each peer's assigned shards. A failed audit lowers
+  reputation **and revokes that peer's accounting credit** (so accept-then-delete costs it
+  its storage budget with you).
 
 - **Reputation** (`internal/reputation`) — audit outcomes accumulate per peer into a
-  Laplace-smoothed pass rate. The trust policy's *neutral* verdict defers here: a neutral
-  peer is used once it has enough history and a high enough score, and avoided if its
-  history is low-scoring. `publish` filters its target peers through `trust` then
-  reputation.
+  Laplace-smoothed pass rate, kept **local and self-written** (your view = your own audits;
+  not gossiped, so Sybils can't inject standing). The trust policy's *neutral* verdict
+  defers here: a neutral peer is used once it has enough history and a high enough score,
+  and avoided if its history is low-scoring. `publish` filters target peers through `trust`
+  then reputation.
 
 - **Space accounting** (`internal/accounting`) — a per-peer ledger of bytes stored *for
-  them* vs. *by them*. On accepting a push, a node enforces a contribution ratio: it
-  stores for a peer at most `ratio × what they store for us + a free quota` (defaults 3×,
-  1 GiB). This is the mechanism behind "contribute 2–4× to consume 1×".
+  them* vs. *by them*. On accepting a push, a node enforces a contribution ratio: it stores
+  for a peer at most `ratio × what they store for us + a free quota` (defaults 3×, 1 GiB).
+  `TheyStoreForUs` is only ever written by your own `publish`, so it can't be spoofed. This
+  is the mechanism behind "contribute 2–4× to consume 1×".
+
+- **Storage leases** (`serve --lease`, `store.KeyedStore.Reap`) — hosted shards carry a
+  lease (file mtime); a node periodically reclaims any not renewed within the window. A
+  re-publish rewrites the same (deterministic) shard ids, refreshing their leases, so an
+  owner who keeps publishing keeps their data and one who abandons it is reclaimed.
 
 - **Erasure-coded redundancy** (`internal/shard`, `internal/pack`) — objects are grouped
   into ≤8 MiB **packs**; each pack is Reed-Solomon coded (`klauspost/reedsolomon`) into M
@@ -277,6 +288,10 @@ These keep distributed data recoverable and keep peers honest.
 ---
 
 ## Threat model & guarantees
+
+A summary here; the full adversarial analysis — free-rider/Sybil resistance, audit limits,
+eclipse, whitewashing, and the friend-to-friend vs. open-network regimes — is in
+[`THREAT_MODEL.md`](THREAT_MODEL.md).
 
 - **Confidentiality:** all stored objects are encrypted client-side; a host holding them
   sees only ciphertext. Metadata (file names, sizes, tree structure) lives inside
