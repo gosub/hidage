@@ -239,7 +239,12 @@ round-robin across the chosen peers, from three sources: `--peer` (explicit mult
 `--trusted` (every trusted key found online via the DHT — `PeerIDFromPubKeyHex` +
 `DialPeerID`), and `--open` (untrusted nodes discovered through a **storage-offer rendezvous
 tag** that `serve` advertises — `FindStorageProviders`, then ranked by reputation with
-Bad/Blocked excluded and capped at `--open-peers`). Since the coding only helps across
+Bad/Blocked excluded and capped at `--open-peers`). With `--transitive`, strangers you
+haven't audited are ranked by **depth-1** opinions from your *anchors* — your trusted
+peers plus your Good peers — queried over `/hidage/reputation/1.0.0` and combined as a
+weighted average where each anchor's opinion is discounted by your own rating of it. It's
+a soft prior for ordering only: it never overrides a `Bad`/`Blocked` verdict or your own
+audits, and depth-1 + anchoring bounds the collusion surface to peers you already trust. Since the coding only helps across
 enough *distinct* peers, it reports the fault tolerance and `--min-peers` guards thin
 configurations. It then fetches the current account manifest,
 upserts this repo's

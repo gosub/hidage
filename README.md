@@ -89,6 +89,8 @@ hidage publish --peer <addr> --min-peers 3    # …or name peers explicitly; --m
                                               #   against too few for the redundancy to matter
 hidage publish --open --redundancy 3          # …or discover untrusted storage nodes via a
                                               #   rendezvous tag (best-effort; ranked by reputation)
+hidage publish --open --transitive            # …ranking strangers by depth-1 opinions from
+                                              #   your trusted + reputable peers
 hidage net-list --bootstrap <addr>            # list all folders you've published
 hidage net-restore ./out --all --bootstrap <addr>   # recover from the network: resolve the
                                               #   account, gather K-of-M shards, rebuild, restore

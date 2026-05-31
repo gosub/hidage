@@ -22,11 +22,12 @@ import (
 )
 
 const (
-	// minSamples is the recent-evidence mass (decayed audit count) a peer needs
+	// MinSamples is the recent-evidence mass (decayed audit count) a peer needs
 	// before it can be classified Good or Bad — roughly three recent audits, set
 	// just under 3 because decay leaves the effective count slightly below the raw
-	// audit count.
-	minSamples = 2.5
+	// audit count. Exported so callers can judge whether a peer's *opinion* of a
+	// third party rests on enough evidence to weigh.
+	MinSamples = 2.5
 	// goodThreshold is the score cutoff separating Good from Bad. It sits below
 	// the achievable maximum (decay+smoothing cap a perfect peer near ~0.88) so a
 	// steadily-passing peer is Good after ~3 audits, while a recent failure (which
@@ -109,11 +110,19 @@ func (s *Store) Score(pubHex string) float64 {
 	return (p + 1) / (p + f + 2)
 }
 
+// Evidence returns a peer's current score and the recency-weighted sample mass
+// behind it — so a caller weighing this node's *opinion* of a third party can tell
+// whether it rests on enough audits to count.
+func (s *Store) Evidence(pubHex string) (score, samples float64) {
+	p, f := effective(s.peers[pubHex], time.Now().UTC())
+	return (p + 1) / (p + f + 2), p + f
+}
+
 // Good reports whether a peer has enough recent history and a high enough score
 // to rely on when no explicit trust decision applies.
 func (s *Store) Good(pubHex string) bool {
 	p, f := effective(s.peers[pubHex], time.Now().UTC())
-	if p+f < minSamples {
+	if p+f < MinSamples {
 		return false
 	}
 	return (p+1)/(p+f+2) >= goodThreshold
@@ -123,7 +132,7 @@ func (s *Store) Good(pubHex string) bool {
 // avoid. (Distinct from "not Good", which also covers peers with little history.)
 func (s *Store) Bad(pubHex string) bool {
 	p, f := effective(s.peers[pubHex], time.Now().UTC())
-	if p+f < minSamples {
+	if p+f < MinSamples {
 		return false
 	}
 	return (p+1)/(p+f+2) < goodThreshold

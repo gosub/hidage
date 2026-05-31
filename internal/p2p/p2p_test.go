@@ -269,3 +269,32 @@ func TestAuditProofOfStorage(t *testing.T) {
 		t.Fatal("audit should fail when the proof does not match expected bytes")
 	}
 }
+
+func TestReputationQuery(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	const target = "1111111111111111111111111111111111111111111111111111111111111111"
+	b, _ := newNodeID(t, nil)
+	b.EnableReputationService(func(h string) (float64, float64) {
+		if h == target {
+			return 0.9, 5
+		}
+		return 0.5, 0
+	})
+	a, _ := newNodeID(t, nil)
+	pid, err := a.Connect(ctx, b.Addrs()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sc, sm, err := a.AskReputation(ctx, pid, target)
+	if err != nil || sc != 0.9 || sm != 5 {
+		t.Fatalf("AskReputation(target) = %v,%v,%v", sc, sm, err)
+	}
+	// Unknown target: peer reports no evidence.
+	_, sm2, err := a.AskReputation(ctx, pid, "2222222222222222222222222222222222222222222222222222222222222222")
+	if err != nil || sm2 != 0 {
+		t.Fatalf("AskReputation(unknown) samples = %v (%v)", sm2, err)
+	}
+}

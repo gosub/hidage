@@ -41,6 +41,7 @@ type Node struct {
 	sink       Sink
 	acceptPush func(senderPub []byte) bool
 	onStored   func(senderPub []byte, bytes int64)
+	repLookup  func(pubHex string) (score, samples float64)
 }
 
 // New starts a libp2p host whose peer ID is derived from id (the node's Ed25519

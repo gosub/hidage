@@ -89,3 +89,17 @@ func TestRecentFailDominatesBankedPasses(t *testing.T) {
 		t.Fatalf("a recent failure should dominate banked passes (score %.2f)", s.Score(key))
 	}
 }
+
+func TestEvidence(t *testing.T) {
+	s, _ := Load(filepath.Join(t.TempDir(), "rep.json"))
+	if sc, sm := s.Evidence(key); sc != 0.5 || sm != 0 {
+		t.Fatalf("unknown Evidence = %v,%v, want 0.5,0", sc, sm)
+	}
+	for i := 0; i < 3; i++ {
+		s.Record(key, true)
+	}
+	sc, sm := s.Evidence(key)
+	if sm < MinSamples || sc < goodThreshold {
+		t.Fatalf("after 3 passes Evidence = %v,%v (want samples≥%v, score≥%v)", sc, sm, MinSamples, goodThreshold)
+	}
+}
