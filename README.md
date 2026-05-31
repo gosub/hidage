@@ -82,7 +82,8 @@ hidage trust list                 # show trusted / blocked keys
 # networking
 hidage serve --listen /ip4/0.0.0.0/tcp/4001   # run a node: join the DHT, serve objects,
                                               #   accept pushes within trust + space budget;
-                                              #   --lease H reclaims un-renewed hosted shards
+                                              #   --lease H reclaims un-renewed hosted shards;
+                                              #   advertises for --open discovery (--advertise=false to opt out)
 hidage publish --trusted --redundancy 3       # erasure-code the latest snapshot and spread
                                               #   shards across every trusted peer found online
 hidage publish --peer <addr> --min-peers 3    # …or name peers explicitly; --min-peers guards
@@ -162,10 +163,11 @@ keyed-store lease reap/renew), the keyring (deterministic derivation, wrong-pass
 recovery-code roundtrip), and the repository end to end — snapshot/restore, `.hidage`
 exclusion, incremental-delta accounting, history/diff, `--replace`, and forget + prune.
 Networking: two-node object transfer, DHT provide/discover, push gated by trust, signed
-head publish/resolve, proof-of-storage audits, reputation (recency decay: stale reverts to
-unproven, a recent fail dominates banked passes), space accounting (ratio/free + revoke),
-the account manifest (upsert/find/roundtrip), Reed-Solomon encode/decode (incl. decode from
-any K subset), deterministic pack build + reassemble below and above the shard threshold, a
+head publish/resolve, proof-of-storage audits, the reputation-query protocol and the
+transitive-aggregation math, reputation (recency decay: stale reverts to unproven, a recent
+fail dominates banked passes), space accounting (ratio/free + revoke), the account manifest
+(upsert/find/roundtrip), Reed-Solomon encode/decode (incl. decode from any K subset),
+deterministic pack build + reassemble below and above the shard threshold, a
 **cross-node recovery** test, and the **redundant-recovery** test (shards spread over 3
 peers, one killed, full byte-identical recovery from the survivors).
 
@@ -188,7 +190,7 @@ peers, one killed, full byte-identical recovery from the survivors).
 | `internal/account` | account manifest: one identity's index of all its network backups |
 | `internal/shard` | Reed-Solomon erasure coding (`klauspost/reedsolomon`): any K of M shards reconstruct |
 | `internal/pack` | group objects into packs, erasure-code them, Release descriptor for reassembly |
-| `internal/p2p` | libp2p host (peer key = identity); object/push/audit protocols, Kademlia DHT, signed head pointers |
+| `internal/p2p` | libp2p host (peer key = identity); object/push/audit/reputation protocols, Kademlia DHT, storage-offer rendezvous, signed head pointers |
 | `internal/netstore` | network-backed object source (DHT discover + fetch) for restoring from peers |
 
 ## Known limitations
