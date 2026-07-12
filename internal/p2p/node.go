@@ -39,7 +39,7 @@ type Node struct {
 	blobs      Blobs
 	dht        *dht.IpfsDHT
 	sink       Sink
-	acceptPush func(senderPub []byte) bool
+	acceptPush func(senderPub []byte, cumulative int64) bool
 	onStored   func(senderPub []byte, bytes int64)
 	repLookup  func(pubHex string) (score, samples float64)
 }

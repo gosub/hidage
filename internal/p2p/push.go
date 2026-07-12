@@ -19,12 +19,25 @@ import (
 // uint32 count of objects stored.
 const PushProtocol = "/hidage/push/1.0.0"
 
+// MaxObjectSize caps a single pushed or fetched object. Legitimate objects are
+// raw chunks (FastCDC max 4 MiB) or erasure-coded shards (~256 KiB); this bound
+// leaves headroom while preventing a peer from making a node allocate gigabytes
+// from a single attacker-supplied length.
+const MaxObjectSize = 16 << 20
+
+// maxIDLen bounds a content-address string on the wire (a 64-char hex SHA-256,
+// or a head/release id of similar length); generous, but not attacker-unbounded.
+const maxIDLen = 256
+
 // EnablePush makes the node accept pushed objects into sink. accept is consulted
-// with the sender's raw Ed25519 public key and must return true to store; a nil
+// with the sender's raw Ed25519 public key and the cumulative bytes this stream
+// would then have stored, and must return true to keep storing; it is called
+// once with 0 to gate the connection and again before each object, so a peer's
+// byte budget is enforced *within* a stream, not only between pushes. A nil
 // accept stores from everyone. onStored, if non-nil, is called after a push with
 // the sender's key and the number of bytes stored (for space accounting). Stored
 // objects are re-announced to the DHT.
-func (n *Node) EnablePush(sink Sink, accept func(senderPub []byte) bool, onStored func(senderPub []byte, bytes int64)) {
+func (n *Node) EnablePush(sink Sink, accept func(senderPub []byte, cumulative int64) bool, onStored func(senderPub []byte, bytes int64)) {
 	n.sink = sink
 	n.acceptPush = accept
 	n.onStored = onStored
@@ -38,8 +51,10 @@ func (n *Node) handlePush(s network.Stream) {
 	if pk := s.Conn().RemotePublicKey(); pk != nil {
 		rawPub, _ = pk.Raw()
 	}
-	accepted := n.acceptPush == nil || (rawPub != nil && n.acceptPush(rawPub))
-	if !accepted {
+	allow := func(cumulative int64) bool {
+		return n.acceptPush == nil || (rawPub != nil && n.acceptPush(rawPub, cumulative))
+	}
+	if !allow(0) {
 		s.Write([]byte{0})
 		return
 	}
@@ -57,6 +72,11 @@ func (n *Node) handlePush(s network.Stream) {
 	for i := uint32(0); i < count; i++ {
 		id, data, err := readObject(br)
 		if err != nil {
+			break
+		}
+		// Enforce the sender's byte budget cumulatively, so a peer with little
+		// remaining quota can't stream unlimited data in one push.
+		if !allow(storedBytes + int64(len(data))) {
 			break
 		}
 		if err := n.sink.Put(id, data); err != nil {
@@ -138,6 +158,9 @@ func readObject(r io.Reader) (string, []byte, error) {
 	if err := binary.Read(r, binary.BigEndian, &idLen); err != nil {
 		return "", nil, err
 	}
+	if idLen > maxIDLen {
+		return "", nil, fmt.Errorf("object id too long: %d", idLen)
+	}
 	idBuf := make([]byte, idLen)
 	if _, err := io.ReadFull(r, idBuf); err != nil {
 		return "", nil, err
@@ -145,6 +168,9 @@ func readObject(r io.Reader) (string, []byte, error) {
 	var dataLen uint64
 	if err := binary.Read(r, binary.BigEndian, &dataLen); err != nil {
 		return "", nil, err
+	}
+	if dataLen > MaxObjectSize {
+		return "", nil, fmt.Errorf("object too large: %d > %d", dataLen, MaxObjectSize)
 	}
 	data := make([]byte, dataLen)
 	if _, err := io.ReadFull(r, data); err != nil {

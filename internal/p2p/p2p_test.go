@@ -3,6 +3,7 @@ package p2p
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"testing"
@@ -294,7 +295,7 @@ func TestPushRefusedWhenBlocked(t *testing.T) {
 
 	sink, _ := store.NewKeyedStore(t.TempDir())
 	s, _ := newNodeID(t, sink)
-	s.EnablePush(sink, func(pub []byte) bool { return false }, nil) // refuse everyone
+	s.EnablePush(sink, func(pub []byte, cumulative int64) bool { return false }, nil) // refuse everyone
 
 	emptyA, _ := store.NewFSStore(t.TempDir())
 	a, _ := newNodeID(t, emptyA)
@@ -304,6 +305,52 @@ func TestPushRefusedWhenBlocked(t *testing.T) {
 	if _, err := a.PushObjects(ctx, s.ID(), map[string][]byte{store.ID([]byte("x")): []byte("x")}); err == nil {
 		t.Fatal("expected push to be refused")
 	}
+}
+
+func TestPushBudgetEnforcedWithinStream(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// Accept up to 10 cumulative bytes in the stream, then stop.
+	sink, _ := store.NewKeyedStore(t.TempDir())
+	s, _ := newNodeID(t, sink)
+	s.EnablePush(sink, func(pub []byte, cumulative int64) bool { return cumulative <= 10 }, nil)
+
+	emptyA, _ := store.NewFSStore(t.TempDir())
+	a, _ := newNodeID(t, emptyA)
+	if _, err := a.Connect(ctx, s.Addrs()[0]); err != nil {
+		t.Fatal(err)
+	}
+
+	// Three 8-byte objects: the first fits (8 ≤ 10), the second would reach 16
+	// and must be rejected, ending the stream — so exactly one is stored.
+	objs := map[string][]byte{}
+	for _, w := range []string{"aaaaaaaa", "bbbbbbbb", "cccccccc"} {
+		objs[store.ID([]byte(w))] = []byte(w)
+	}
+	stored, err := a.PushObjects(ctx, s.ID(), objs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored != 1 {
+		t.Fatalf("stored %d objects, want 1 (budget should have stopped the stream)", stored)
+	}
+}
+
+func TestOversizedObjectRejected(t *testing.T) {
+	if _, _, err := readObject(oversizedObjectFrame()); err == nil {
+		t.Fatal("expected readObject to reject an object larger than MaxObjectSize")
+	}
+}
+
+// oversizedObjectFrame builds a push frame declaring a data length above the cap.
+func oversizedObjectFrame() *bytes.Reader {
+	var buf bytes.Buffer
+	id := "deadbeef"
+	binary.Write(&buf, binary.BigEndian, uint32(len(id)))
+	buf.WriteString(id)
+	binary.Write(&buf, binary.BigEndian, uint64(MaxObjectSize+1))
+	return bytes.NewReader(buf.Bytes())
 }
 
 func TestAuditProofOfStorage(t *testing.T) {

@@ -107,6 +107,9 @@ func (n *Node) FetchObject(ctx context.Context, p peer.ID, id string) ([]byte, e
 		return nil, fmt.Errorf("read length: %w", err)
 	}
 	n64 := binary.BigEndian.Uint64(lenBuf[:])
+	if n64 > MaxObjectSize {
+		return nil, fmt.Errorf("object too large: %d > %d", n64, MaxObjectSize)
+	}
 	data := make([]byte, n64)
 	if _, err := io.ReadFull(s, data); err != nil {
 		return nil, fmt.Errorf("read object: %w", err)

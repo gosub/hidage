@@ -113,11 +113,13 @@ func newServeCmd() *cobra.Command {
 			})
 			free := freeMiB << 20
 			node.EnablePush(pub,
-				func(senderPub []byte) bool {
+				func(senderPub []byte, cumulative int64) bool {
 					if policy.Verdict(ed25519.PublicKey(senderPub)) == trust.Blocked {
 						return false
 					}
-					return ledger.Allow(hex.EncodeToString(senderPub), 0, ratio, free)
+					// cumulative is what this stream would have stored so far; the
+					// ledger checks it stays within ratio×reciprocation + free.
+					return ledger.Allow(hex.EncodeToString(senderPub), cumulative, ratio, free)
 				},
 				func(senderPub []byte, b int64) {
 					ledger.AddStoredForThem(hex.EncodeToString(senderPub), b)
