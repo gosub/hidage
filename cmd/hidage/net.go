@@ -112,7 +112,7 @@ func newServeCmd() *cobra.Command {
 			if err := node.Bootstrap(ctx, bootstrap); err != nil {
 				return err
 			}
-			go reprovide(ctx, node, pub)
+			go reprovideLoop(ctx, node, pub)
 			go gcLoop(ctx, pub, time.Duration(leaseHours)*time.Hour)
 			if advertise {
 				go advertiseLoop(ctx, node)
@@ -708,14 +708,31 @@ func restoreRelease(ns *netstore.Store, cache *store.KeyedStore, masterKey []byt
 	return repo.RestoreWith(dag.NewLoader(cache, cache, masterKey), snap, outDir)
 }
 
-// reprovide announces every locally-held object to the DHT.
-func reprovide(ctx context.Context, node *p2p.Node, blobs *store.KeyedStore) {
-	ids, err := blobs.List()
-	if err != nil {
-		return
+// reprovideLoop periodically announces every locally-held object to the DHT.
+// Provider records expire (libp2p's default validity is ~48h), so a one-shot
+// announce would make hosted shards undiscoverable — and unrecoverable — within
+// a day; refreshing well inside that window keeps them findable.
+func reprovideLoop(ctx context.Context, node *p2p.Node, blobs *store.KeyedStore) {
+	const interval = 12 * time.Hour // comfortably under the ~48h record validity
+	reprovide := func() {
+		ids, err := blobs.List()
+		if err != nil {
+			return
+		}
+		for _, id := range ids {
+			_ = node.Provide(ctx, id)
+		}
 	}
-	for _, id := range ids {
-		_ = node.Provide(ctx, id)
+	reprovide()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			reprovide()
+		}
 	}
 }
 
