@@ -31,6 +31,10 @@ func (n *Node) registerObjectHandler() {
 		}
 		id = id[:len(id)-1] // strip newline
 
+		if n.blobs == nil {
+			s.Write([]byte{0}) // this node serves nothing (e.g. a publish/audit client)
+			return
+		}
 		data, err := n.blobs.Get(id)
 		if err != nil {
 			s.Write([]byte{0}) // missing (or unreadable)

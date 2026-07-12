@@ -83,6 +83,25 @@ func TestFetchObjectBetweenNodes(t *testing.T) {
 	}
 }
 
+// TestObjectRequestToNilBlobsNode ensures a node built without a blob source (as
+// publish/audit/net-restore are) answers an object request cleanly instead of
+// crashing on a nil dereference — any peer could otherwise take it down.
+func TestObjectRequestToNilBlobsNode(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	a := newNode(t, nil) // serves nothing, like a publish client
+	b := newNode(t, nil)
+
+	pid, err := b.Connect(ctx, a.Addrs()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.FetchObject(ctx, pid, "deadbeef"); !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("want ErrObjectNotFound, got %v", err)
+	}
+}
+
 func TestDHTProvideAndFind(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
