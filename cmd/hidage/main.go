@@ -1,6 +1,8 @@
-// Command hidage is the CLI for hidden storage: it encrypts, fountain-shards,
-// and reassembles files and folders. The MVP keeps shards in a local
-// content-addressed store; later phases distribute them across a P2P network.
+// Command hidage is the CLI for hidden storage: an encrypted, versioned,
+// distributed backup tool. It snapshots folders into a content-addressed
+// repository (deterministic encryption + Merkle DAG + signed snapshots), then
+// erasure-codes a snapshot into shards spread across libp2p peers, with
+// proof-of-storage audits, reputation, and space accounting keeping hosts honest.
 package main
 
 import (
