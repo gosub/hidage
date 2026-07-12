@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"hidage/internal/dag"
 )
@@ -58,6 +59,8 @@ func materialize(l *dag.Loader, e dag.Entry, parentDir string) error {
 				return err
 			}
 		}
+		// Set the directory mtime last: writing children would otherwise bump it.
+		restoreModTime(target, e.ModTime)
 	case dag.KindFile:
 		fn, err := l.File(e.Ref)
 		if err != nil {
@@ -84,10 +87,22 @@ func materialize(l *dag.Loader, e dag.Entry, parentDir string) error {
 		if err := out.Close(); err != nil {
 			return err
 		}
+		restoreModTime(target, e.ModTime)
 	default:
 		return fmt.Errorf("unknown entry kind %q", e.Kind)
 	}
 	return nil
+}
+
+// restoreModTime applies a recorded modification time (unix nanoseconds) to a
+// restored path. Zero means the snapshot predates mtime recording, so it is left
+// at the current time; failures are non-fatal (the data is already written).
+func restoreModTime(path string, modTime int64) {
+	if modTime == 0 {
+		return
+	}
+	t := time.Unix(0, modTime)
+	_ = os.Chtimes(path, t, t)
 }
 
 // safeJoin joins a child name onto a directory, rejecting traversal.

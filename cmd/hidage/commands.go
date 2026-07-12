@@ -57,11 +57,26 @@ func newSnapshotCmd() *cobra.Command {
 				fmt.Printf("  replaced previous snapshot; pruned %d objects\n", stats.Pruned)
 			}
 			fmt.Printf("  total objects: %d\n", stats.TotalObjects)
+			if n := len(stats.Skipped); n > 0 {
+				fmt.Printf("  WARNING: skipped %d unsupported entr%s (symlinks/devices/etc.), not backed up:\n",
+					n, plural(n, "y", "ies"))
+				for _, p := range stats.Skipped {
+					fmt.Printf("    %s\n", p)
+				}
+			}
 			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&replace, "replace", false, "supersede the previous snapshot and prune it")
 	return cmd
+}
+
+// plural returns one or other by count, for readable messages.
+func plural(n int, one, other string) string {
+	if n == 1 {
+		return one
+	}
+	return other
 }
 
 func newSnapshotsCmd() *cobra.Command {

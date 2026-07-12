@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"hidage/internal/crypto"
 	"hidage/internal/identity"
@@ -63,6 +64,43 @@ func TestSnapshotRestoreRoundtrip(t *testing.T) {
 		if string(got) != want {
 			t.Fatalf("%s = %q, want %q", rel, got, want)
 		}
+	}
+}
+
+func TestModTimePreservedOnRestore(t *testing.T) {
+	r, priv, folder := newRepo(t)
+	want := time.Unix(1_600_000_000, 0)
+	if err := os.Chtimes(filepath.Join(folder, "a.txt"), want, want); err != nil {
+		t.Fatal(err)
+	}
+	snap, _, err := r.Snapshot(priv, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	if err := r.Restore(snap, out); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(filepath.Join(out, "data", "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.ModTime().Equal(want) {
+		t.Fatalf("restored mtime = %v, want %v", fi.ModTime(), want)
+	}
+}
+
+func TestUnsupportedEntriesReported(t *testing.T) {
+	r, priv, folder := newRepo(t)
+	if err := os.Symlink("a.txt", filepath.Join(folder, "link")); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+	_, stats, err := r.Snapshot(priv, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats.Skipped) != 1 || filepath.Base(stats.Skipped[0]) != "link" {
+		t.Fatalf("expected the symlink to be reported skipped, got %v", stats.Skipped)
 	}
 }
 

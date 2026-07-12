@@ -13,9 +13,10 @@ import (
 
 // SnapshotStats summarizes what a snapshot stored.
 type SnapshotStats struct {
-	TotalObjects int // objects across both stores after the snapshot
-	NewObjects   int // objects this snapshot actually wrote (the delta)
-	Pruned       int // objects reclaimed when --replace dropped the previous snapshot
+	TotalObjects int      // objects across both stores after the snapshot
+	NewObjects   int      // objects this snapshot actually wrote (the delta)
+	Pruned       int      // objects reclaimed when --replace dropped the previous snapshot
+	Skipped      []string // paths of unsupported entries (symlinks, devices, …) not backed up
 }
 
 // Snapshot captures the repository's tracked folder. With replace set, it
@@ -38,7 +39,8 @@ func (r *Repo) Snapshot(priv ed25519.PrivateKey, replace bool) (*Snapshot, *Snap
 	}
 
 	b := dag.NewBuilder(r.meta, r.data, r.masterKey)
-	root, err := r.buildRoot(b, r.Folder, info)
+	var skipped []string
+	root, err := r.buildRoot(b, r.Folder, info, &skipped)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -72,7 +74,7 @@ func (r *Repo) Snapshot(priv ed25519.PrivateKey, replace bool) (*Snapshot, *Snap
 	if err != nil {
 		return nil, nil, err
 	}
-	stats := &SnapshotStats{TotalObjects: len(after), NewObjects: len(after) - len(before)}
+	stats := &SnapshotStats{TotalObjects: len(after), NewObjects: len(after) - len(before), Skipped: skipped}
 
 	if replace && prev != nil {
 		if err := r.Forget(prev.ID); err != nil {
@@ -90,18 +92,19 @@ func (r *Repo) Snapshot(priv ed25519.PrivateKey, replace bool) (*Snapshot, *Snap
 
 // buildRoot wraps the tracked folder under a single top-level entry named after
 // it, so it restores under its original name.
-func (r *Repo) buildRoot(b *dag.Builder, src string, info os.FileInfo) (dag.Ref, error) {
-	ref, err := r.buildTree(b, src)
+func (r *Repo) buildRoot(b *dag.Builder, src string, info os.FileInfo, skipped *[]string) (dag.Ref, error) {
+	ref, err := r.buildTree(b, src, skipped)
 	if err != nil {
 		return dag.Ref{}, err
 	}
-	entry := dag.Entry{Name: filepath.Base(src), Kind: dag.KindTree, Mode: uint32(info.Mode().Perm()), Ref: ref}
+	entry := dag.Entry{Name: filepath.Base(src), Kind: dag.KindTree, Mode: uint32(info.Mode().Perm()), ModTime: info.ModTime().UnixNano(), Ref: ref}
 	return b.PutTree(dag.TreeNode{Entries: []dag.Entry{entry}})
 }
 
-// buildTree recurses a directory, skipping the .hidage metadata directory.
-// os.ReadDir returns entries sorted by name, so builds are deterministic.
-func (r *Repo) buildTree(b *dag.Builder, dir string) (dag.Ref, error) {
+// buildTree recurses a directory, skipping the .hidage metadata directory and
+// recording (via skipped) any unsupported entry it can't back up. os.ReadDir
+// returns entries sorted by name, so builds are deterministic.
+func (r *Repo) buildTree(b *dag.Builder, dir string, skipped *[]string) (dag.Ref, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return dag.Ref{}, fmt.Errorf("read dir %s: %w", dir, err)
@@ -118,19 +121,22 @@ func (r *Repo) buildTree(b *dag.Builder, dir string) (dag.Ref, error) {
 		}
 		switch {
 		case de.IsDir():
-			ref, err := r.buildTree(b, full)
+			ref, err := r.buildTree(b, full, skipped)
 			if err != nil {
 				return dag.Ref{}, err
 			}
-			tn.Entries = append(tn.Entries, dag.Entry{Name: de.Name(), Kind: dag.KindTree, Mode: uint32(fi.Mode().Perm()), Ref: ref})
+			tn.Entries = append(tn.Entries, dag.Entry{Name: de.Name(), Kind: dag.KindTree, Mode: uint32(fi.Mode().Perm()), ModTime: fi.ModTime().UnixNano(), Ref: ref})
 		case fi.Mode().IsRegular():
 			ref, err := r.buildFile(b, full, fi)
 			if err != nil {
 				return dag.Ref{}, err
 			}
-			tn.Entries = append(tn.Entries, dag.Entry{Name: de.Name(), Kind: dag.KindFile, Mode: uint32(fi.Mode().Perm()), Ref: ref})
+			tn.Entries = append(tn.Entries, dag.Entry{Name: de.Name(), Kind: dag.KindFile, Mode: uint32(fi.Mode().Perm()), ModTime: fi.ModTime().UnixNano(), Ref: ref})
 		default:
-			// Skip symlinks, devices, etc. in this phase.
+			// Symlinks, devices, sockets, etc. are not represented in the DAG;
+			// record them so the snapshot can report what it did not capture
+			// rather than dropping them silently.
+			*skipped = append(*skipped, full)
 		}
 	}
 	return b.PutTree(tn)
@@ -159,7 +165,7 @@ func (r *Repo) buildFile(b *dag.Builder, path string, info os.FileInfo) (dag.Ref
 	if err != nil {
 		return dag.Ref{}, fmt.Errorf("chunk %s: %w", path, err)
 	}
-	return b.PutFile(dag.FileNode{Mode: uint32(info.Mode().Perm()), Size: size, Chunks: chunks})
+	return b.PutFile(dag.FileNode{Mode: uint32(info.Mode().Perm()), Size: size, ModTime: info.ModTime().UnixNano(), Chunks: chunks})
 }
 
 // objectIDs returns the union of object IDs across the meta and data stores.
