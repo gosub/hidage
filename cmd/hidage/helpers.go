@@ -90,3 +90,15 @@ func discoverRepo() (*repo.Repo, error) {
 	}
 	return repo.Open(folder, kr.MasterKey(), config.DataStoreDir())
 }
+
+// discoverRepoNoKey opens the repository without unlocking the keyring, for
+// commands that only touch plaintext snapshot metadata (snapshots, forget) and
+// never decrypt object data — so they skip the passphrase prompt and the Argon2id
+// cost. Snapshots are self-verifying (each carries its owner key + signature).
+func discoverRepoNoKey() (*repo.Repo, error) {
+	folder := repo.Find(startDir())
+	if folder == "" {
+		return nil, fmt.Errorf("not inside a hidage repository (run `hidage snapshot` to create one)")
+	}
+	return repo.Open(folder, nil, config.DataStoreDir())
+}

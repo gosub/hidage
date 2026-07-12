@@ -85,7 +85,7 @@ func newSnapshotsCmd() *cobra.Command {
 		Short: "List snapshot history (oldest first)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r, err := discoverRepo()
+			r, err := discoverRepoNoKey() // listing reads only signed metadata
 			if err != nil {
 				return err
 			}
@@ -170,7 +170,7 @@ func newForgetCmd() *cobra.Command {
 		Short: "Remove a snapshot record (run prune to reclaim space)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r, err := discoverRepo()
+			r, err := discoverRepoNoKey() // just removes a signed metadata record
 			if err != nil {
 				return err
 			}
