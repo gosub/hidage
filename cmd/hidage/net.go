@@ -409,7 +409,7 @@ func newPublishCmd() *cobra.Command {
 
 			common := map[string][]byte{relID: relBytes, manifestID: manifestBytes}
 			assignments := spreadShards(shardBlobs, common, len(accepted))
-			dist := distribution{ReleaseID: relID, Redundancy: redundancy, Peers: map[string][]string{}}
+			dist := distribution{ReleaseID: relID, SnapshotID: snap.ID, Redundancy: redundancy, PublishedAt: time.Now().UTC(), Peers: map[string][]string{}}
 			for i, p := range accepted {
 				push := assignments[i]
 				var bytes int64
@@ -534,9 +534,13 @@ func buildAnchors(ctx context.Context, node *p2p.Node, policy *trust.Policy, rep
 
 // distribution records which shards of the latest release went to which peer, so
 // audit can later challenge each peer for exactly the shards it agreed to hold.
+// SnapshotID names the published snapshot so `status` can detect a repository
+// whose latest snapshot has not been re-published.
 type distribution struct {
 	ReleaseID  string              `json:"releaseID"`
+	SnapshotID string              `json:"snapshotID"`
 	Redundancy float64             `json:"redundancy"`
+	PublishedAt time.Time          `json:"publishedAt"`
 	Peers      map[string][]string `json:"peers"` // peer pubkey hex -> shard ids
 }
 

@@ -25,6 +25,7 @@ func main() {
 		newInitCmd(),
 		newSnapshotCmd(),
 		newSnapshotsCmd(),
+		newStatusCmd(),
 		newRestoreCmd(),
 		newDiffCmd(),
 		newForgetCmd(),
@@ -41,7 +42,10 @@ func main() {
 		newAccountingCmd(),
 	)
 	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		// A degraded-backup status is a non-zero exit, not an error to print.
+		if _, ok := err.(*degradedError); !ok {
+			fmt.Fprintln(os.Stderr, "error:", err)
+		}
 		os.Exit(1)
 	}
 }

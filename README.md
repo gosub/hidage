@@ -68,6 +68,8 @@ hidage recovery-code              # print the 24-word phrase — WRITE IT DOWN
 hidage snapshot ./project         # snapshot a folder (creates ./project/.hidage on first use)
 hidage snapshot --replace ./project   # … superseding the previous snapshot (no history kept)
 cd project && hidage snapshots    # run inside a tracked folder; commands discover .hidage
+hidage status                     # is this backup protected? snapshot age, published?, peers,
+                                  #   fault tolerance, failing audits (non-zero exit if degraded)
 hidage diff <idA> <idB>           # paths added / removed / modified between snapshots
 hidage restore <id> ./out         # materialize a version into ./out
 hidage forget <id>                # drop a snapshot record …
