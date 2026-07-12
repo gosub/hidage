@@ -3,6 +3,7 @@ package p2p
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"testing"
 	"time"
@@ -210,7 +211,7 @@ func TestPushTrustAndHead(t *testing.T) {
 	}
 
 	// Head pointer: A publishes, S resolves it.
-	if err := a.PutHead(ctx, idA, "snapshot-xyz"); err != nil {
+	if _, err := a.PutHead(ctx, idA, "snapshot-xyz"); err != nil {
 		t.Fatal(err)
 	}
 	var head string
@@ -223,6 +224,67 @@ func TestPushTrustAndHead(t *testing.T) {
 	}
 	if head != "snapshot-xyz" {
 		t.Fatalf("GetHead = %q, want snapshot-xyz", head)
+	}
+}
+
+func TestHeadPushAndRepublish(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	// Storage node S persists pushed head records; owner A hands one over.
+	sink, _ := store.NewKeyedStore(t.TempDir())
+	s, _ := newNodeID(t, sink)
+	s.EnableDHT(ctx)
+	stored := map[string][]byte{}
+	s.EnableHeadStore(func(ownerHex string, val []byte) error {
+		stored[ownerHex] = val
+		return nil
+	})
+
+	emptyA, _ := store.NewFSStore(t.TempDir())
+	a, idA := newNodeID(t, emptyA)
+	a.EnableDHT(ctx)
+	if err := a.Bootstrap(ctx, s.Addrs()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Bootstrap(ctx, a.Addrs()); err != nil {
+		t.Fatal(err)
+	}
+	s.WaitForPeers(ctx, 1, 10*time.Second) // S must have a peer to store records at
+
+	val, err := a.PutHead(ctx, idA, "snap-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.PushHead(ctx, s.ID(), HeadKey(idA.Public), val); err != nil {
+		t.Fatal(err)
+	}
+	ownerHex := hex.EncodeToString(idA.Public)
+	if _, ok := stored[ownerHex]; !ok {
+		t.Fatal("storage node did not persist the pushed head record")
+	}
+
+	// A forged record (bad signature) must be rejected (the receiver drops it, so
+	// the client may see no ack — what matters is it is not stored).
+	_ = a.PushHead(ctx, s.ID(), HeadKey(idA.Public), []byte(`{"snapshotID":"evil","createdAt":1,"sig":"AA=="}`))
+	if string(stored[ownerHex]) != string(val) {
+		t.Fatal("forged head record was accepted")
+	}
+
+	// S can re-publish the owner-signed record to the DHT on A's behalf.
+	if err := s.RepublishHead(ctx, ownerHex, stored[ownerHex]); err != nil {
+		t.Fatalf("republish: %v", err)
+	}
+	var head string
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if head, _ = a.GetHead(ctx, idA.Public); head == "snap-1" {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if head != "snap-1" {
+		t.Fatalf("GetHead after republish = %q, want snap-1", head)
 	}
 }
 

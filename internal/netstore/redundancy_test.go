@@ -96,7 +96,7 @@ func TestRedundantRecoverySurvivesPeerLoss(t *testing.T) {
 			t.Fatalf("push to peer %d: %v", i, err)
 		}
 	}
-	if err := owner.PutHead(ctx, idA, relID); err != nil {
+	if _, err := owner.PutHead(ctx, idA, relID); err != nil {
 		t.Fatal(err)
 	}
 	owner.Close()

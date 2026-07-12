@@ -93,7 +93,7 @@ func TestEndToEndCrossNodeRecovery(t *testing.T) {
 	if stored != len(pubset) {
 		t.Fatalf("pushed %d objects, S stored %d", len(pubset), stored)
 	}
-	if err := aNode.PutHead(ctx, idA, snap.ID); err != nil {
+	if _, err := aNode.PutHead(ctx, idA, snap.ID); err != nil {
 		t.Fatal(err)
 	}
 	aNode.Close() // the owner's machine is gone

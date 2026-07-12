@@ -51,6 +51,12 @@ func publishedStore() (*store.KeyedStore, error) {
 	return store.NewKeyedStore(filepath.Join(config.DataStoreDir(), "published"))
 }
 
+// headsStore holds signed head records this node re-publishes on owners' behalf,
+// keyed by owner public-key hex, so discovery survives an owner going offline.
+func headsStore() (*store.KeyedStore, error) {
+	return store.NewKeyedStore(filepath.Join(config.DataStoreDir(), "heads"))
+}
+
 func newServeCmd() *cobra.Command {
 	var listen string
 	var bootstrap []string
@@ -98,6 +104,13 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 			node.EnableReputationService(rep.Evidence) // answer peers' transitive-trust queries
+			heads, err := headsStore()
+			if err != nil {
+				return err
+			}
+			node.EnableHeadStore(func(ownerHex string, val []byte) error {
+				return heads.Put(ownerHex, val) // owner-signed; re-published so recovery survives owner loss
+			})
 			free := freeMiB << 20
 			node.EnablePush(pub,
 				func(senderPub []byte) bool {
@@ -113,6 +126,7 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 			go reprovideLoop(ctx, node, pub)
+			go republishHeadsLoop(ctx, node, heads)
 			go gcLoop(ctx, pub, time.Duration(leaseHours)*time.Hour)
 			if advertise {
 				go advertiseLoop(ctx, node)
@@ -418,8 +432,15 @@ func newPublishCmd() *cobra.Command {
 			if err := writeDistribution(r.HidageFile("distribution.json"), dist); err != nil {
 				return err
 			}
-			if err := node.PutHead(ctx, kr.Identity(), manifestID); err != nil {
+			headVal, err := node.PutHead(ctx, kr.Identity(), manifestID)
+			if err != nil {
 				return fmt.Errorf("publish head: %w", err)
+			}
+			// Hand the signed head to peers so they keep it discoverable after we
+			// go offline (they re-publish it; it's owner-signed, so safe to serve).
+			headKey := p2p.HeadKey(kr.Identity().Public)
+			for _, p := range accepted {
+				_ = node.PushHead(ctx, p.id, headKey, headVal)
 			}
 			fmt.Printf("Published %q (%s) as %d shards across %d peers (%.1fx redundancy).\n",
 				snap.Source, r.RepoID()[:12], len(shardBlobs), len(accepted), redundancy)
@@ -732,6 +753,38 @@ func reprovideLoop(ctx context.Context, node *p2p.Node, blobs *store.KeyedStore)
 			return
 		case <-t.C:
 			reprovide()
+		}
+	}
+}
+
+// republishHeadsLoop periodically re-puts every head record this node holds on
+// owners' behalf, so an owner's backups stay discoverable after the owner goes
+// offline (DHT head records otherwise expire once nobody refreshes them).
+func republishHeadsLoop(ctx context.Context, node *p2p.Node, heads *store.KeyedStore) {
+	const interval = 12 * time.Hour // under the DHT record validity
+	republish := func() {
+		node.WaitForPeers(ctx, 1, time.Minute) // can't put into an empty routing table
+		ownerHexes, err := heads.List()
+		if err != nil {
+			return
+		}
+		for _, ownerHex := range ownerHexes {
+			val, err := heads.Get(ownerHex)
+			if err != nil {
+				continue
+			}
+			_ = node.RepublishHead(ctx, ownerHex, val)
+		}
+	}
+	republish()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			republish()
 		}
 	}
 }
