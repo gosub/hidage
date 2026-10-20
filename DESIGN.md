@@ -211,6 +211,21 @@ is re-read when its file changes, so `friend add/rm` applies to a running node.
 
 ## Networking (`internal/p2p`, `internal/netstore`)
 
+**Reaching friends across NATs.** Nodes listen on TCP and QUIC (IPv4 and IPv6) and try, in
+order: a direct connection (UPnP/NAT-PMP port mapping helps home routers), then a
+connection through a **friend's circuit relay**, which DCUtR hole punching then tries to
+upgrade to a direct one. `serve` offers the relay service to friends only (an ACL over both
+ends of the circuit) and with no time or data limit, so a relayed link can carry backup
+data when hole punching fails. A node that decides it is behind a NAT reserves slots on
+friends' relays and advertises `/p2p/<relay>/p2p-circuit` addresses, which end up in its
+contact card. `reachability` in `config.toml` controls the decision: `auto` (the default)
+treats a node with no public IP on any interface as private, rather than waiting for
+AutoNAT, which needs several peers to agree and so can stay undecided in a small group;
+`public` (port forwarded) and `private` override it. libp2p only advertises circuit
+addresses through relays with a public IP, so at least one friend must be reachable; a
+small VPS running `serve` works as the group's relay, and overlay networks (Tailscale,
+WireGuard, ZeroTier) work as plain addresses.
+
 A node is a **libp2p host whose peer ID is its Ed25519 identity** (so a recovered node has
 the same peer ID as the original). It speaks three things:
 

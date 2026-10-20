@@ -204,6 +204,10 @@ peers, one killed, full byte-identical recovery from the survivors).
   host explicitly. There is no discovery of strangers' storage. Erasure coding only helps across enough distinct
   peers, so `--min-peers` guards against (and a single-peer publish warns about)
   configurations with no fault tolerance.
+- **Reachability** — nodes behind NATs reach each other through a friend's relay (then
+  hole punching), so at least one friend in the group needs a public address (a port
+  forward, a small VPS running `serve`, or an overlay such as Tailscale/WireGuard).
+  See `reachability` in `config.toml`.
 - **Pseudonymous, not IP-anonymous** — peers are identified by public key, but their IP
   addresses are visible to peers they connect to (network-level anonymity is out of scope).
 - **Single-writer** — snapshots assume one owner per repository; concurrent writers from
