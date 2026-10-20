@@ -30,16 +30,15 @@ adversarial gaps** — honestly, so nothing is relied on that shouldn't be. See
   detect peers that drop data; **reputation** steers future placement away from
   them.
 
-## Trust model — two regimes
+## Trust model — friends only
 
-hidage has two modes, with very different guarantees:
-
-1. **Friend-to-friend (strong).** You `trust add` the public keys of people you
-   know and publish only to them. The incentive/Sybil problems below largely
-   evaporate, because participation is gated by out-of-band social trust. **This
-   is the mode to rely on for important data.**
-2. **Open network (best-effort).** Publishing to/serving strangers. Confidentiality
-   and integrity still hold, but the *economic* guarantees are weak — see below.
+hidage is backup **with friends**: you `trust add` the public keys of people you
+know and publish only to them (`--peer` / `--trusted`). There is no discovery of,
+or publishing to, strangers' storage. The incentive/Sybil problems below are
+largely mitigated because participation is gated by out-of-band social trust; the
+ones that remain come from `serve` still accepting pushes from non-blocked
+unknown keys under the free quota (to be replaced by friends-only acceptance, see
+[`docs/friends-only.md`](docs/friends-only.md)).
 
 ## Known adversarial gaps
 
@@ -65,27 +64,6 @@ redundancy limits data loss but not censorship) and **whitewashing** (a peer wit
 bad reputation discards its identity and rejoins clean with a fresh free quota).
 The robust mitigation is the friend-to-friend regime; costly identities
 (proof-of-work/stake) are out of scope.
-
-`publish --open` is the entry point to this exposure: it hands shards to *discovered
-strangers*. It is gated — Bad/Blocked peers are excluded, candidates are ranked by
-your own reputation of them, the count is capped (`--open-peers`), and shards are
-encrypted — but it is explicitly **best-effort**. For data you can't afford to lose,
-use `--peer`/`--trusted`.
-
-### Transitive reputation (`--transitive`)
-Discovered strangers you've never audited are *unproven*, so plain reputation ranking
-mostly orders the few peers you know ahead of the rest. `publish --transitive` improves
-this by asking your **anchors** — trusted peers plus your Good peers — for *their*
-opinion of a stranger (`/hidage/reputation`), combined as a weighted average discounted
-by your own rating of each anchor. It is deliberately constrained: **depth-1** (no
-friends-of-friends), **anchored** (only peers you already trust/rate can influence it),
-a **soft prior** (it reorders candidates but never overrides `Bad`/`Blocked` or your own
-audits), and opt-in. Even so it reintroduces a *bounded* version of the gossip surface
-the local-only model avoids: an opinion is **self-reported** (an anchor could lie — but
-only your chosen anchors are consulted, and only to *rank*, not to gate), and querying
-leaks your interest in a peer to your anchors. Net: it trades a little of the local-only
-Sybil isolation for better ranking of open-network strangers, scoped so the worst case
-is "an anchor I trusted misranked a candidate," never silent data loss.
 
 ### Audit outsourcing
 The audit proves *someone* holds the bytes, not that *this* peer does. A lazy peer
@@ -133,15 +111,12 @@ lease GC reclaims it. Neither is rate-limited yet.
 
 - **Network-level anonymity** — peers' IP addresses are visible to peers they
   connect to.
-- **A paid storage market** — nodes can be *discovered* (`publish --open` via the
-  rendezvous tag) and ranked by reputation, but there is no pricing/payment/
-  contract layer.
+- **Backing up to strangers / a paid storage market** — there is no discovery of
+  untrusted storage nodes and no pricing/payment/contract layer.
 - **Costly identities / global consensus reputation** — kept local and
   Sybil-isolated instead.
 
 ## One-line summary
 
-> Confidentiality and integrity are strong and cryptographic. Availability and the
-> storage economy are **best-effort on the open network** and **robust only in the
-> friend-to-friend (trusted-peer) regime** — use trusted peers for anything you
-> can't afford to lose.
+> Confidentiality and integrity are strong and cryptographic. Availability rests on
+> the friends you publish to; audits tell you when one of them stops holding your data.

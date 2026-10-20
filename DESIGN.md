@@ -235,16 +235,9 @@ own — the signed head endorses its content address, and the fetcher verifies t
 
 `publish` gathers a snapshot's object closure (`repo.PublishSet`: snapshot bytes + every
 reachable DAG node + chunk), **erasure-codes** it (below), and spreads the resulting shards
-round-robin across the chosen peers, from three sources: `--peer` (explicit multiaddrs),
+round-robin across the chosen peers, from two sources: `--peer` (explicit multiaddrs) and
 `--trusted` (every trusted key found online via the DHT — `PeerIDFromPubKeyHex` +
-`DialPeerID`), and `--open` (untrusted nodes discovered through a **storage-offer rendezvous
-tag** that `serve` advertises — `FindStorageProviders`, then ranked by reputation with
-Bad/Blocked excluded and capped at `--open-peers`). With `--transitive`, strangers you
-haven't audited are ranked by **depth-1** opinions from your *anchors* — your trusted
-peers plus your Good peers — queried over `/hidage/reputation/1.0.0` and combined as a
-weighted average where each anchor's opinion is discounted by your own rating of it. It's
-a soft prior for ordering only: it never overrides a `Bad`/`Blocked` verdict or your own
-audits, and depth-1 + anchoring bounds the collusion surface to peers you already trust. Since the coding only helps across
+`DialPeerID`). Since the coding only helps across
 enough *distinct* peers, it reports the fault tolerance and `--min-peers` guards thin
 configurations. It then fetches the current account manifest,
 upserts this repo's
@@ -304,7 +297,7 @@ These keep distributed data recoverable and keep peers honest.
 ## Threat model & guarantees
 
 A summary here; the full adversarial analysis — free-rider/Sybil resistance, audit limits,
-eclipse, whitewashing, and the friend-to-friend vs. open-network regimes — is in
+eclipse, whitewashing, and the friends-only trust model — is in
 [`THREAT_MODEL.md`](THREAT_MODEL.md).
 
 - **Confidentiality:** all stored objects are encrypted client-side; a host holding them
@@ -335,9 +328,9 @@ explicitly marked out of scope:
   `internal/accounting`, audit protocol; see "Durability" above).
 - **Erasure-coded redundancy** — ✅ *implemented* (`internal/shard` Reed-Solomon +
   `internal/pack`; see "Durability" above).
-- **Storage market** — *not built.* Nodes can be discovered (`publish --open` via the
-  rendezvous tag) and ranked by reputation, but there is no pricing/payment/contract layer;
-  a paid market remains deliberately out of scope.
+- **Storage from strangers / storage market** — *removed / out of scope.* hidage backs up
+  to friends only (see [`docs/friends-only.md`](docs/friends-only.md)); there is no
+  discovery of untrusted storage and no pricing/payment/contract layer.
 - **Network-level anonymity** (hiding IPs via onion/mixnet routing) — *out of scope.*
 
 ### Disaster recovery — rebuild from the network with no local state

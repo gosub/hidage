@@ -84,16 +84,11 @@ hidage trust list                 # show trusted / blocked keys
 # networking
 hidage serve --listen /ip4/0.0.0.0/tcp/4001   # run a node: join the DHT, serve objects,
                                               #   accept pushes within trust + space budget;
-                                              #   --lease H reclaims un-renewed hosted shards;
-                                              #   advertises for --open discovery (--advertise=false to opt out)
+                                              #   --lease H reclaims un-renewed hosted shards
 hidage publish --trusted --redundancy 3       # erasure-code the latest snapshot and spread
                                               #   shards across every trusted peer found online
 hidage publish --peer <addr> --min-peers 3    # …or name peers explicitly; --min-peers guards
                                               #   against too few for the redundancy to matter
-hidage publish --open --redundancy 3          # …or discover untrusted storage nodes via a
-                                              #   rendezvous tag (best-effort; ranked by reputation)
-hidage publish --open --transitive            # …ranking strangers by depth-1 opinions from
-                                              #   your trusted + reputable peers
 hidage net-list --bootstrap <addr>            # list all folders you've published
 hidage net-restore ./out --all --bootstrap <addr>   # recover from the network: resolve the
                                               #   account, gather K-of-M shards, rebuild, restore
@@ -165,8 +160,7 @@ keyed-store lease reap/renew), the keyring (deterministic derivation, wrong-pass
 recovery-code roundtrip), and the repository end to end — snapshot/restore, `.hidage`
 exclusion, incremental-delta accounting, history/diff, `--replace`, and forget + prune.
 Networking: two-node object transfer, DHT provide/discover, push gated by trust, signed
-head publish/resolve, proof-of-storage audits, the reputation-query protocol and the
-transitive-aggregation math, reputation (recency decay: stale reverts to unproven, a recent
+head publish/resolve, proof-of-storage audits, reputation (recency decay: stale reverts to unproven, a recent
 fail dominates banked passes), space accounting (ratio/free + revoke), the account manifest
 (upsert/find/roundtrip), Reed-Solomon encode/decode (incl. decode from any K subset),
 deterministic pack build + reassemble below and above the shard threshold, a
@@ -192,22 +186,18 @@ peers, one killed, full byte-identical recovery from the survivors).
 | `internal/account` | account manifest: one identity's index of all its network backups |
 | `internal/shard` | Reed-Solomon erasure coding (`klauspost/reedsolomon`): any K of M shards reconstruct |
 | `internal/pack` | group objects into packs, erasure-code them, Release descriptor for reassembly |
-| `internal/p2p` | libp2p host (peer key = identity); object/push/audit/reputation protocols, Kademlia DHT, storage-offer rendezvous, signed head pointers |
+| `internal/p2p` | libp2p host (peer key = identity); object/push/audit/head protocols, Kademlia DHT, signed head pointers |
 | `internal/netstore` | network-backed object source (DHT discover + fetch) for restoring from peers |
 
 ## Known limitations
 
 > **Security & incentives:** confidentiality and integrity are cryptographic and strong;
-> the storage *economy* (free-rider/Sybil resistance, audit guarantees) is best-effort on
-> the open network and robust mainly in the **friend-to-friend (trusted-peer)** regime.
-> See [`THREAT_MODEL.md`](THREAT_MODEL.md) for the full adversarial analysis.
+> hidage is built for backup **with friends**: you store shards only on peers you know
+> and trust. See [`THREAT_MODEL.md`](THREAT_MODEL.md) for the full adversarial analysis.
 
 
-- **Peer selection** — `--peer` names hosts explicitly, `--trusted` spreads to your trusted
-  peers (friend-to-friend), and `--open` discovers untrusted storage nodes via a rendezvous
-  tag (ranked by reputation, Bad/Blocked excluded). `--open` is **best-effort** — handing
-  data to strangers is the Sybil-exposed mode (see [`THREAT_MODEL.md`](THREAT_MODEL.md));
-  use `--trusted` for anything important. Erasure coding only helps across enough distinct
+- **Peer selection** — `--peer` names hosts explicitly and `--trusted` spreads to your
+  trusted peers. There is no discovery of strangers' storage. Erasure coding only helps across enough distinct
   peers, so `--min-peers` guards against (and a single-peer publish warns about)
   configurations with no fault tolerance.
 - **Pseudonymous, not IP-anonymous** — peers are identified by public key, but their IP

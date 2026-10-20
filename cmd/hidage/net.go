@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"syscall"
 	"time"
 
@@ -63,7 +62,6 @@ func newServeCmd() *cobra.Command {
 	var ratio float64
 	var freeMiB int64
 	var leaseHours int
-	var advertise bool
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run a node: serve objects, accept pushes from trusted peers, join the DHT",
@@ -99,11 +97,6 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			rep, err := reputation.Load(paths.ReputationPath)
-			if err != nil {
-				return err
-			}
-			node.EnableReputationService(rep.Evidence) // answer peers' transitive-trust queries
 			heads, err := headsStore()
 			if err != nil {
 				return err
@@ -130,9 +123,6 @@ func newServeCmd() *cobra.Command {
 			go reprovideLoop(ctx, node, pub)
 			go republishHeadsLoop(ctx, node, heads)
 			go gcLoop(ctx, pub, time.Duration(leaseHours)*time.Hour)
-			if advertise {
-				go advertiseLoop(ctx, node)
-			}
 
 			fmt.Println("hidage node listening; addresses:")
 			for _, a := range node.Addrs() {
@@ -148,24 +138,7 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().Float64Var(&ratio, "ratio", accounting.DefaultRatio, "max bytes stored per peer per byte they store for us")
 	cmd.Flags().Int64Var(&freeMiB, "free", accounting.DefaultFreeQuota>>20, "free quota per peer, in MiB (no reciprocation required)")
 	cmd.Flags().IntVar(&leaseHours, "lease", 168, "hosted-shard lease in hours; data not renewed (re-published) within this is reclaimed")
-	cmd.Flags().BoolVar(&advertise, "advertise", true, "announce on the DHT that this node offers storage (discoverable by `publish --open`)")
 	return cmd
-}
-
-// advertiseLoop periodically announces this node as a storage provider; provider
-// records expire, so they must be refreshed.
-func advertiseLoop(ctx context.Context, node *p2p.Node) {
-	for {
-		node.WaitForPeers(ctx, 1, time.Minute) // can't advertise into an empty routing table
-		c, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		_ = node.AdvertiseStorage(c)
-		cancel()
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(time.Hour):
-		}
-	}
 }
 
 // gcLoop periodically reclaims hosted objects whose storage lease has lapsed
@@ -197,10 +170,7 @@ func newPublishCmd() *cobra.Command {
 	var bootstrap, peers []string
 	var redundancy float64
 	var useTrusted bool
-	var useOpen bool
-	var openPeers int
 	var minPeers int
-	var transitive bool
 	cmd := &cobra.Command{
 		Use:   "publish",
 		Short: "Erasure-code the latest snapshot, spread shards across peers, publish the head",
@@ -288,8 +258,8 @@ func newPublishCmd() *cobra.Command {
 				return err
 			}
 
-			if len(peers) == 0 && !useTrusted && !useOpen {
-				return fmt.Errorf("specify where to publish: --peer <addr>, --trusted, and/or --open")
+			if len(peers) == 0 && !useTrusted {
+				return fmt.Errorf("specify where to publish: --peer <addr> and/or --trusted")
 			}
 
 			// Collect candidate peers: explicit --peer multiaddrs, plus (with
@@ -329,67 +299,6 @@ func newPublishCmd() *cobra.Command {
 					}
 					add(pid)
 				}
-			}
-			if useOpen {
-				// Discover storage nodes via the rendezvous tag, drop blocked/known-bad
-				// ones, rank the rest, and take the top N.
-				providers, _ := node.FindStorageProviders(ctx)
-
-				// With --transitive, consult depth-1 anchors (trusted + Good peers,
-				// each weighted by my own rating) to rank strangers I haven't audited.
-				var anchors []anchorConn
-				if transitive {
-					anchors = buildAnchors(ctx, node, policy, rep)
-					fmt.Printf("transitive ranking: consulting %d anchor(s)\n", len(anchors))
-				}
-				rankScore := func(pubHex string) float64 {
-					myScore, mySamples := rep.Evidence(pubHex)
-					if mySamples >= reputation.MinSamples {
-						return myScore // I have enough first-hand evidence
-					}
-					if len(anchors) > 0 {
-						var ops []weightedOpinion
-						for _, a := range anchors {
-							sc, sm, err := node.AskReputation(ctx, a.pid, pubHex)
-							if err == nil {
-								ops = append(ops, weightedOpinion{weight: a.weight, score: sc, samples: sm})
-							}
-						}
-						if v, ok := aggregateTransitive(ops, reputation.MinSamples); ok {
-							return v
-						}
-					}
-					return 0.5 // unproven, no anchor opinion
-				}
-
-				type cand struct {
-					ai    peer.AddrInfo
-					score float64
-				}
-				var cands []cand
-				for _, ai := range providers {
-					if ai.ID == node.ID() || seen[ai.ID] {
-						continue
-					}
-					pubHex, err := p2p.PeerPubKeyHex(ai.ID)
-					if err != nil || !acceptablePeer(policy, rep, pubHex) {
-						continue
-					}
-					cands = append(cands, cand{ai, rankScore(pubHex)})
-				}
-				sort.Slice(cands, func(i, j int) bool { return cands[i].score > cands[j].score })
-				picked := 0
-				for _, c := range cands {
-					if picked >= openPeers {
-						break
-					}
-					if err := node.ConnectInfo(ctx, c.ai); err != nil {
-						continue
-					}
-					add(c.ai.ID)
-					picked++
-				}
-				fmt.Printf("Discovered %d storage node(s) via --open; using %d.\n", len(cands), picked)
 			}
 			if len(accepted) == 0 {
 				return fmt.Errorf("no acceptable peers reachable to publish to")
@@ -453,9 +362,6 @@ func newPublishCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
 	cmd.Flags().StringArrayVar(&peers, "peer", nil, "storage peer multiaddr(s) to push to")
 	cmd.Flags().BoolVar(&useTrusted, "trusted", false, "also push to every trusted peer found online (see `hidage trust`)")
-	cmd.Flags().BoolVar(&useOpen, "open", false, "also discover untrusted storage nodes on the network (best-effort; ranked by reputation)")
-	cmd.Flags().IntVar(&openPeers, "open-peers", 5, "with --open, how many discovered nodes to use")
-	cmd.Flags().BoolVar(&transitive, "transitive", false, "rank --open strangers using depth-1 opinions from trusted + reputable peers")
 	cmd.Flags().IntVar(&minPeers, "min-peers", 1, "fail unless at least this many acceptable peers are reachable")
 	cmd.Flags().Float64Var(&redundancy, "redundancy", 2.0, "shards to emit per shard needed (e.g. 2.0 tolerates losing half)")
 	return cmd
@@ -464,72 +370,6 @@ func newPublishCmd() *cobra.Command {
 type peerID struct {
 	id     peer.ID
 	pubHex string
-}
-
-// anchorConn is a reachable depth-1 trust anchor and my weight for its opinions.
-type anchorConn struct {
-	pid    peer.ID
-	weight float64
-}
-
-// weightedOpinion is one anchor's reported opinion of a candidate, with my
-// weight for that anchor and the evidence behind the anchor's opinion.
-type weightedOpinion struct {
-	weight  float64
-	score   float64
-	samples float64
-}
-
-// aggregateTransitive combines anchor opinions into a single score: a weighted
-// average over anchors that have enough evidence (each anchor's opinion is
-// discounted by my weight for that anchor). Returns false if no anchor has a
-// well-founded opinion. Pure function — unit-tested.
-func aggregateTransitive(ops []weightedOpinion, minSamples float64) (float64, bool) {
-	var num, den float64
-	for _, o := range ops {
-		if o.samples < minSamples {
-			continue // the anchor itself hasn't audited this peer enough to count
-		}
-		num += o.weight * o.score
-		den += o.weight
-	}
-	if den == 0 {
-		return 0, false
-	}
-	return num / den, true
-}
-
-// buildAnchors resolves and connects to depth-1 trust anchors: every trusted key
-// (weight 1.0) and every peer whose own reputation is Good (weight = my score for
-// it). Only reachable anchors are returned.
-func buildAnchors(ctx context.Context, node *p2p.Node, policy *trust.Policy, rep *reputation.Store) []anchorConn {
-	anchorsHex := map[string]bool{}
-	trusted, _ := policy.List()
-	for _, h := range trusted {
-		anchorsHex[h] = true
-	}
-	for _, e := range rep.List() {
-		if e.Good {
-			anchorsHex[e.PubKey] = true
-		}
-	}
-	var out []anchorConn
-	for h := range anchorsHex {
-		pid, err := p2p.PeerIDFromPubKeyHex(h)
-		if err != nil || pid == node.ID() {
-			continue
-		}
-		if err := node.DialPeerID(ctx, pid); err != nil {
-			continue // anchor offline
-		}
-		weight := 1.0 // trusted anchors carry full weight
-		if raw, err := hex.DecodeString(h); err == nil && len(raw) == ed25519.PublicKeySize &&
-			policy.Verdict(ed25519.PublicKey(raw)) != trust.Trusted {
-			weight = rep.Score(h) // a Good (not explicitly trusted) anchor: discount by my rating
-		}
-		out = append(out, anchorConn{pid: pid, weight: weight})
-	}
-	return out
 }
 
 // distribution records which shards of the latest release went to which peer, so
