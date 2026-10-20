@@ -7,7 +7,8 @@
 // Repository objects (chunks and DAG nodes) are not sealed here: they use the
 // deterministic, content-addressed scheme in deterministic.go, which derives the
 // key and nonce from the plaintext under the user's master key so identical
-// content deduplicates. This file is only the passphrase→root wrapping.
+// content deduplicates. This file is the passphrase→root wrapping; seal.go seals
+// small private records under derived subkeys.
 package crypto
 
 import (

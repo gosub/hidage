@@ -40,3 +40,25 @@ func TestWrapUnwrapDEK(t *testing.T) {
 		t.Fatal("expected unwrap with wrong passphrase to fail")
 	}
 }
+
+func TestSealOpenSubKey(t *testing.T) {
+	master := make([]byte, KeySize)
+	k1, k2 := SubKey(master, "a"), SubKey(master, "b")
+	if string(k1) == string(k2) || string(k1) == string(master) {
+		t.Fatal("subkeys must differ by label and from the master key")
+	}
+	s1, err := Seal(k1, []byte("roster"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, _ := Seal(k1, []byte("roster"))
+	if string(s1) == string(s2) {
+		t.Fatal("Seal must use a random nonce")
+	}
+	if pt, err := Open(k1, s1); err != nil || string(pt) != "roster" {
+		t.Fatalf("Open = %q, %v", pt, err)
+	}
+	if _, err := Open(k2, s1); err == nil {
+		t.Fatal("wrong key opened the record")
+	}
+}
