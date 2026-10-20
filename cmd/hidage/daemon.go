@@ -324,8 +324,6 @@ func installService() error {
 		p := filepath.Join(home, ".config", "systemd", "user", "hidage.service")
 		unit := fmt.Sprintf(`[Unit]
 Description=hidage: backups with friends
-Wants=network-online.target
-After=network-online.target
 
 [Service]
 ExecStart=%s daemon
