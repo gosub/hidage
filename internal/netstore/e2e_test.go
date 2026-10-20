@@ -67,7 +67,7 @@ func TestEndToEndCrossNodeRecovery(t *testing.T) {
 	// Storage peer S: accepts pushes and serves them.
 	sink, _ := store.NewKeyedStore(t.TempDir())
 	idS, _ := identity.Generate()
-	sNode, err := p2p.New(idS, sink, "/ip4/127.0.0.1/tcp/0")
+	sNode, err := p2p.New(idS, sink, []string{"/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestEndToEndCrossNodeRecovery(t *testing.T) {
 	sNode.EnablePush(sink, nil, nil)
 
 	// Owner node A: push the object closure to S, publish the head, then leave.
-	aNode, err := p2p.New(idA, nil, "/ip4/127.0.0.1/tcp/0")
+	aNode, err := p2p.New(idA, nil, []string{"/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestEndToEndCrossNodeRecovery(t *testing.T) {
 	aNode.Close() // the owner's machine is gone
 
 	// Recovered node B: same identity (from the recovery code), only the network.
-	bNode, err := p2p.New(idA, nil, "/ip4/127.0.0.1/tcp/0")
+	bNode, err := p2p.New(idA, nil, []string{"/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}

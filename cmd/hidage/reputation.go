@@ -106,7 +106,7 @@ func newAuditCmd() *cobra.Command {
 				return err
 			}
 
-			node, err := p2p.New(kr.Identity(), nil, "")
+			node, err := p2p.New(kr.Identity(), nil, nil)
 			if err != nil {
 				return err
 			}

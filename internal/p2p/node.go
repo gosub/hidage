@@ -45,9 +45,14 @@ type Node struct {
 }
 
 // New starts a libp2p host whose peer ID is derived from id (the node's Ed25519
-// identity), listening on listen (a multiaddr; empty = an ephemeral TCP port on
-// all interfaces). It serves objects from blobs.
-func New(id identity.Identity, blobs Blobs, listen string, opts ...Option) (*Node, error) {
+// identity), listening on listen (multiaddrs; empty = ephemeral TCP and QUIC
+// ports on all interfaces). It serves objects from blobs.
+//
+// Every node tries to be reachable across NATs: UPnP/NAT-PMP port mapping, the
+// circuit-relay transport (to dial friends through a relay) and DCUtR hole
+// punching (to upgrade relayed connections to direct ones). Options add the relay
+// service and relay reservations; see connectivity.go.
+func New(id identity.Identity, blobs Blobs, listen []string, opts ...Option) (*Node, error) {
 	var o options
 	for _, opt := range opts {
 		opt(&o)
@@ -56,13 +61,19 @@ func New(id identity.Identity, blobs Blobs, listen string, opts ...Option) (*Nod
 	if err != nil {
 		return nil, fmt.Errorf("convert identity key: %w", err)
 	}
-	if listen == "" {
-		listen = "/ip4/0.0.0.0/tcp/0"
+	if len(listen) == 0 {
+		listen = []string{"/ip4/0.0.0.0/tcp/0", "/ip4/0.0.0.0/udp/0/quic-v1"}
 	}
-	lopts := []libp2p.Option{libp2p.Identity(priv), libp2p.ListenAddrStrings(listen)}
+	lopts := []libp2p.Option{
+		libp2p.Identity(priv),
+		libp2p.ListenAddrStrings(listen...),
+		libp2p.NATPortMap(),
+		libp2p.EnableHolePunching(),
+	}
 	if o.allowInbound != nil {
 		lopts = append(lopts, libp2p.ConnectionGater(inboundGater{allow: o.allowInbound}))
 	}
+	lopts = append(lopts, o.connectivity()...)
 	h, err := libp2p.New(lopts...)
 	if err != nil {
 		return nil, fmt.Errorf("start libp2p host: %w", err)

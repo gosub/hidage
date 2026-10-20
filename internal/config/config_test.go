@@ -60,7 +60,7 @@ func TestTemplateRoundTrip(t *testing.T) {
 	}
 	want := Defaults()
 	want.Store = os.Getenv(DataStoreEnv)
-	if got.Name != want.Name || got.Store != want.Store || got.Listen[0] != want.Listen[0] ||
+	if got.Name != want.Name || got.Store != want.Store || len(got.Listen) != len(want.Listen) || got.Listen[3] != want.Listen[3] || got.Reachability != want.Reachability ||
 		got.Hosting != want.Hosting || got.Backup != want.Backup {
 		t.Fatalf("template decodes to %+v, want %+v", got, want)
 	}

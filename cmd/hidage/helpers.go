@@ -7,9 +7,13 @@ import (
 	"os"
 	"syscall"
 
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/multiformats/go-multiaddr"
+	manet "github.com/multiformats/go-multiaddr/net"
 	"golang.org/x/term"
 
 	"hidage/internal/config"
+	"hidage/internal/friends"
 	"hidage/internal/keyring"
 	"hidage/internal/p2p"
 	"hidage/internal/repo"
@@ -145,4 +149,39 @@ func joinNetwork(ctx context.Context, node *p2p.Node, explicit []string) error {
 		return nil
 	}
 	return err
+}
+
+// friendAddrInfos returns every friend with known addresses as libp2p address
+// info (used as relay candidates).
+func friendAddrInfos(book *friends.Book) []peer.AddrInfo {
+	var out []peer.AddrInfo
+	for _, f := range book.List() {
+		pid, err := f.PeerID()
+		if err != nil || len(f.Addrs) == 0 {
+			continue
+		}
+		ai := peer.AddrInfo{ID: pid}
+		for _, a := range f.Addrs {
+			if ma, err := multiaddr.NewMultiaddr(a); err == nil {
+				ai.Addrs = append(ai.Addrs, ma)
+			}
+		}
+		out = append(out, ai)
+	}
+	return out
+}
+
+// hasPublicInterface reports whether any network interface has a public
+// (globally routable) IP address.
+func hasPublicInterface() bool {
+	addrs, err := manet.InterfaceMultiaddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if manet.IsPublicAddr(a) {
+			return true
+		}
+	}
+	return false
 }

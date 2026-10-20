@@ -35,7 +35,7 @@ func newNetListCmd() *cobra.Command {
 				owner = ed25519.PublicKey(raw)
 			}
 
-			node, err := p2p.New(kr.Identity(), nil, "")
+			node, err := p2p.New(kr.Identity(), nil, nil)
 			if err != nil {
 				return err
 			}

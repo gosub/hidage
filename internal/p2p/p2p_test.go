@@ -21,7 +21,7 @@ func newNode(t *testing.T, blobs Blobs) *Node {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n, err := New(id, blobs, "/ip4/127.0.0.1/tcp/0")
+	n, err := New(id, blobs, []string{"/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,14 +31,14 @@ func newNode(t *testing.T, blobs Blobs) *Node {
 
 func TestPeerIDFromIdentity(t *testing.T) {
 	id, _ := identity.Generate()
-	n, err := New(id, nil, "/ip4/127.0.0.1/tcp/0")
+	n, err := New(id, nil, []string{"/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer n.Close()
 	// The peer ID must be derived from the Ed25519 public key, so two nodes from
 	// the same identity get the same peer ID.
-	n2, err := New(id, nil, "/ip4/127.0.0.1/tcp/0")
+	n2, err := New(id, nil, []string{"/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func newNodeID(t *testing.T, blobs Blobs) (*Node, identity.Identity) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n, err := New(id, blobs, "/ip4/127.0.0.1/tcp/0")
+	n, err := New(id, blobs, []string{"/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +407,7 @@ func TestInboundFilter(t *testing.T) {
 	friend, _ := newNodeID(t, nil)
 	stranger, _ := newNodeID(t, nil)
 	id, _ := identity.Generate()
-	gated, err := New(id, nil, "/ip4/127.0.0.1/tcp/0", WithInboundFilter(func(p peer.ID) bool {
+	gated, err := New(id, nil, []string{"/ip4/127.0.0.1/tcp/0"}, WithInboundFilter(func(p peer.ID) bool {
 		return p == friend.ID()
 	}))
 	if err != nil {

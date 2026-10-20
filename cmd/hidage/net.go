@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -39,7 +40,7 @@ func headsStore() (*store.KeyedStore, error) {
 }
 
 func newServeCmd() *cobra.Command {
-	var listen string
+	var listen []string
 	var bootstrap []string
 	var ratio float64
 	var freeMiB int64
@@ -58,8 +59,12 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 			settings, _ := config.Load()
-			if !cmd.Flags().Changed("listen") && len(settings.Listen) > 0 {
-				listen = settings.Listen[0]
+			if !cmd.Flags().Changed("listen") {
+				listen = settings.Listen
+			}
+			reach, err := p2p.ParseReachability(settings.Reachability)
+			if err != nil {
+				return err
 			}
 			if !cmd.Flags().Changed("lease") {
 				leaseHours = settings.Hosting.LeaseDays * 24
@@ -72,11 +77,22 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Friends only: refuse inbound connections from anyone else.
-			node, err := p2p.New(kr.Identity(), pub, listen, p2p.WithInboundFilter(func(id peer.ID) bool {
+			isFriend := func(id peer.ID) bool {
 				book.Refresh() // pick up `friend add/rm` made while serving
 				return book.IsFriendPeer(id)
-			}))
+			}
+			if reach == p2p.ReachabilityAuto && !hasPublicInterface() {
+				// No public IP on any interface: behind a NAT unless a port is
+				// forwarded (then set reachability = "public"). Deciding now, rather
+				// than waiting for AutoNAT, which needs several peers to agree,
+				// gets relay reservations in place even in a two-friend group.
+				reach = p2p.ReachabilityPrivate
+			}
+			node, err := p2p.New(kr.Identity(), pub, listen,
+				p2p.WithInboundFilter(isFriend), // friends only: refuse anyone else
+				p2p.WithRelayService(isFriend),  // relay for friends while reachable
+				p2p.WithRelayCandidates(func() []peer.AddrInfo { return friendAddrInfos(book) }),
+				p2p.WithReachability(reach))
 			if err != nil {
 				return err
 			}
@@ -123,6 +139,7 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 			defer os.Remove(nodeStatePath())
+			go nodeStateLoop(ctx, node) // relay and port-mapped addresses appear later
 			fmt.Println("hidage node listening; addresses:")
 			for _, a := range node.Addrs() {
 				fmt.Printf("  %s\n", a)
@@ -133,12 +150,32 @@ func newServeCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&listen, "listen", "", "listen multiaddr (default: first `listen` in config.toml)")
+	cmd.Flags().StringArrayVar(&listen, "listen", nil, "listen multiaddr(s) (default: `listen` in config.toml)")
 	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s) (default: your friends)")
 	cmd.Flags().Float64Var(&ratio, "ratio", accounting.DefaultRatio, "max bytes stored per peer per byte they store for us")
 	cmd.Flags().Int64Var(&freeMiB, "free", accounting.DefaultFreeQuota>>20, "free quota per peer, in MiB (no reciprocation required)")
 	cmd.Flags().IntVar(&leaseHours, "lease", 0, "hosted-shard lease in hours; data not renewed within this is reclaimed (default: hosting.lease_days)")
 	return cmd
+}
+
+// nodeStateLoop keeps node.json in step with the node's addresses, which change
+// as relay reservations, port mappings and observed addresses come and go.
+func nodeStateLoop(ctx context.Context, node *p2p.Node) {
+	last := strings.Join(node.ListenAddrs(), " ")
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			addrs := node.ListenAddrs()
+			if cur := strings.Join(addrs, " "); cur != last {
+				last = cur
+				_ = writeNodeState(addrs)
+			}
+		}
+	}
 }
 
 // gcLoop periodically reclaims hosted objects whose storage lease has lapsed
@@ -230,7 +267,7 @@ func newPublishCmd() *cobra.Command {
 			}
 			relID := store.ID(relBytes)
 
-			node, err := p2p.New(kr.Identity(), nil, "")
+			node, err := p2p.New(kr.Identity(), nil, nil)
 			if err != nil {
 				return err
 			}
@@ -474,7 +511,7 @@ func newNetRestoreCmd() *cobra.Command {
 				owner = ed25519.PublicKey(raw)
 			}
 
-			node, err := p2p.New(kr.Identity(), nil, "")
+			node, err := p2p.New(kr.Identity(), nil, nil)
 			if err != nil {
 				return err
 			}

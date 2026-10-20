@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/BurntSushi/toml"
@@ -85,9 +86,11 @@ type Settings struct {
 	// Store is the data store directory ("" = default resolution).
 	Store string `toml:"store"`
 	// Listen is the list of multiaddrs the node listens on.
-	Listen  []string `toml:"listen"`
-	Hosting Hosting  `toml:"hosting"`
-	Backup  Backup   `toml:"backup"`
+	Listen []string `toml:"listen"`
+	// Reachability is "auto", "public" or "private" (see p2p.Reachability).
+	Reachability string  `toml:"reachability"`
+	Hosting      Hosting `toml:"hosting"`
+	Backup       Backup  `toml:"backup"`
 }
 
 // Hosting configures what this node stores for friends.
@@ -110,10 +113,14 @@ type Backup struct {
 func Defaults() Settings {
 	name, _ := os.Hostname()
 	return Settings{
-		Name:    name,
-		Listen:  []string{"/ip4/0.0.0.0/tcp/4001"},
-		Hosting: Hosting{DefaultGive: 100 << 30, LeaseDays: 90},
-		Backup:  Backup{Redundancy: 2.0, MinFriends: 1},
+		Name: name,
+		Listen: []string{
+			"/ip4/0.0.0.0/tcp/4001", "/ip4/0.0.0.0/udp/4001/quic-v1",
+			"/ip6/::/tcp/4001", "/ip6/::/udp/4001/quic-v1",
+		},
+		Reachability: "auto",
+		Hosting:      Hosting{DefaultGive: 100 << 30, LeaseDays: 90},
+		Backup:       Backup{Redundancy: 2.0, MinFriends: 1},
 	}
 }
 
@@ -187,7 +194,11 @@ func WriteTemplate(p Paths) (bool, error) {
 		return false, nil
 	}
 	d := Defaults()
-	body := fmt.Sprintf(template, d.Name, DataStoreDir(), d.Listen[0],
+	listen := make([]string, len(d.Listen))
+	for i, l := range d.Listen {
+		listen[i] = fmt.Sprintf("%q", l)
+	}
+	body := fmt.Sprintf(template, d.Name, DataStoreDir(), strings.Join(listen, ", "), d.Reachability,
 		FormatSize(int64(d.Hosting.DefaultGive)), d.Hosting.LeaseDays,
 		d.Backup.Redundancy, d.Backup.MinFriends)
 	if err := os.WriteFile(p.ConfigPath, []byte(body), 0o600); err != nil {
@@ -204,8 +215,14 @@ name = %q
 # Where chunk data (yours and friends') is stored. HIDAGE_STORE overrides it.
 store = %q
 
-# Addresses this node listens on.
-listen = [%q]
+# Addresses this node listens on (TCP and QUIC, IPv4 and IPv6).
+listen = [%s]
+
+# Can friends reach this node from the internet?
+#   "auto"    public if a network interface has a public IP, else behind a NAT
+#   "public"  e.g. a port is forwarded: this node relays for friends behind NATs
+#   "private" behind a NAT: reserve a slot on a reachable friend's relay
+reachability = %q
 
 [hosting]
 # Space granted to a newly added friend (change per friend with "hidage friend set").

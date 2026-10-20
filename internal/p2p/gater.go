@@ -11,7 +11,10 @@ import (
 type Option func(*options)
 
 type options struct {
-	allowInbound func(peer.ID) bool
+	allowInbound    func(peer.ID) bool
+	relayFor        func(peer.ID) bool
+	relayCandidates func() []peer.AddrInfo
+	reachability    Reachability
 }
 
 // WithInboundFilter admits inbound connections only from peers for which allow

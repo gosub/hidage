@@ -58,7 +58,7 @@ func TestRedundantRecoverySurvivesPeerLoss(t *testing.T) {
 	for i := range storNodes {
 		sink, _ := store.NewKeyedStore(t.TempDir())
 		id, _ := identity.Generate()
-		n, err := p2p.New(id, sink, "/ip4/127.0.0.1/tcp/0")
+		n, err := p2p.New(id, sink, []string{"/ip4/127.0.0.1/tcp/0"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -79,7 +79,7 @@ func TestRedundantRecoverySurvivesPeerLoss(t *testing.T) {
 	storNodes[0].Bootstrap(ctx, nil)
 
 	// Owner spreads shards round-robin across the three peers, plus the Release.
-	owner, _ := p2p.New(idA, nil, "/ip4/127.0.0.1/tcp/0")
+	owner, _ := p2p.New(idA, nil, []string{"/ip4/127.0.0.1/tcp/0"})
 	owner.EnableDHT(ctx)
 	owner.Bootstrap(ctx, storNodes[0].Addrs())
 	assign := make([]map[string][]byte, 3)
@@ -105,7 +105,7 @@ func TestRedundantRecoverySurvivesPeerLoss(t *testing.T) {
 	storNodes[1].Close()
 
 	// Recover from the survivors (bootstrap off both remaining peers).
-	rec, _ := p2p.New(idA, nil, "/ip4/127.0.0.1/tcp/0")
+	rec, _ := p2p.New(idA, nil, []string{"/ip4/127.0.0.1/tcp/0"})
 	defer rec.Close()
 	rec.EnableDHT(ctx)
 	rec.Bootstrap(ctx, append(storNodes[0].Addrs(), storNodes[2].Addrs()...))
