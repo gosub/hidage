@@ -7,7 +7,7 @@ adversarial gaps** — honestly, so nothing is relied on that shouldn't be. See
 ## Roles
 
 - **Owner** — backs up their own folders; publishes shards, audits, recovers.
-- **Storage peer** — runs `serve`, holds other people's encrypted shards.
+- **Storage peer** — runs `daemon`, holds other people's encrypted shards.
 - Every node is identified by an **Ed25519 public key**, which is also its libp2p
   peer ID. Identities are free to create.
 
@@ -33,7 +33,7 @@ adversarial gaps** — honestly, so nothing is relied on that shouldn't be. See
 ## Trust model — friends only
 
 hidage is backup **with friends**: you `friend add` the contact cards of people
-you know, publish only to them, and `serve` refuses inbound connections from
+you know, publish only to them, and `daemon` refuses inbound connections from
 anyone else (a connection gater on the authenticated peer key). There is no
 discovery of, or publishing to, strangers' storage. The incentive/Sybil problems
 below are therefore largely moot: they apply only to a friend misbehaving, and
@@ -54,10 +54,16 @@ Identities are costless, but with the friends-only model (no DHT, no free quota,
 inbound connections only from friends) a minted identity has no way in: it is
 useless until someone adds its contact card.
 
+### Stolen identity cache
+`identity.key` lets the daemon host for friends without the passphrase. It cannot decrypt
+backups, but whoever reads it can act as you towards your friends: publish over your
+backups (bounded by their trash) and fetch your (encrypted) data. Keep it like an SSH key;
+deleting it only means a locked daemon can't start until you unlock once.
+
 ### Leaked invites
 An invite lets whoever holds it pair once until it expires (24 h by default), like an
 invite link: send it privately. `friend ls` shows every friend and `friend rm` revokes one.
-While any invite is open, `serve` accepts connections from unknown keys, but answers them
+While any invite is open, `daemon` accepts connections from unknown keys, but answers them
 only on the pairing protocol.
 
 ### Audit outsourcing

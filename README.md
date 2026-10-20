@@ -85,7 +85,10 @@ hidage friend set bob --give 200GiB   # change a friend's nickname or the space 
 hidage friend ls                  # list friends; `friend rm <name>` removes one
 
 # networking
-hidage serve                      # run a node: serve objects, accept pushes from friends
+hidage daemon                     # run the node: back up `folders` from config.toml on
+                                  #   schedule (snapshot, publish, renew, audit) and host
+                                  #   for friends; `daemon --install` adds a user service
+                                  #   (systemd/launchd). Serve objects, accept pushes from friends
                                   #   only (connections from anyone else are refused),
                                   #   within the space you give each; replaced data is kept in
                                   #   trash for a while, unrenewed backups expire
@@ -109,8 +112,12 @@ hidage audit                      # challenge the friends holding this repo's sh
 - The **bulk chunk store** defaults to `~/.local/share/hidage/store` (an existing
   `/opt/hidage/store` is still used); set `store` in `config.toml` or the `HIDAGE_STORE` env
   var to put it elsewhere, on a roomy disk excluded from your backups.
-- **Settings** live in `~/.config/hidage/config.toml`; `serve` and `publish` take their
+- **Settings** live in `~/.config/hidage/config.toml`; `daemon` and `publish` take their
   listen address, lease, redundancy and minimum peer count from it unless a flag overrides.
+- For unattended backups set `passphrase_command` (e.g. `systemd-creds`, `pass`). Without
+  it, a daemon started at boot runs **locked**: it hosts and relays for friends from a
+  cached identity key (`identity.key`, which can't decrypt backups) but takes no backups,
+  and `status` says so.
 - Snapshot IDs may be given as any unambiguous **prefix**.
 - The passphrase (set at `init`) is read interactively; for scripting/tests set
   `HIDAGE_PASSPHRASE`.
@@ -178,7 +185,7 @@ peers, one killed, full byte-identical recovery from the survivors).
 
 | Path | Responsibility |
 |---|---|
-| `cmd/hidage` | CLI: snapshot/restore/diff/prune, recovery-code/recover, id/friend, serve/publish/net-restore/net-list, audit, status |
+| `cmd/hidage` | CLI: snapshot/restore/diff/prune, recovery-code/recover, id/friend, daemon/publish/net-restore/net-list, audit, status |
 | `internal/config` | `config.toml` settings, config + data-store path resolution (`HIDAGE_STORE`) |
 | `internal/keyring` | root secret (wrapped under passphrase) → master key + identity; BIP39 recovery code |
 | `internal/identity` | Ed25519 keypair derived from the keyring (libp2p peer key) |
@@ -208,7 +215,7 @@ peers, one killed, full byte-identical recovery from the survivors).
   configurations with no fault tolerance.
 - **Reachability** — nodes behind NATs reach each other through a friend's relay (then
   hole punching), so at least one friend in the group needs a public address (a port
-  forward, a small VPS running `serve`, or an overlay such as Tailscale/WireGuard).
+  forward, a small VPS running `daemon`, or an overlay such as Tailscale/WireGuard).
   See `reachability` in `config.toml`.
 - **Pseudonymous, not IP-anonymous** — peers are identified by public key, but their IP
   addresses are visible to peers they connect to (network-level anonymity is out of scope).
@@ -227,7 +234,7 @@ peers, one killed, full byte-identical recovery from the survivors).
   + Merkle DAG + signed snapshots, so updating/changing/removing files re-stores only the
   delta, with history and prune/GC.
 - **Phase 3 — networking + trust + recovery.** ✅ Done. Recovery code (`recovery-code` /
-  `recover`); a friend list (`friend …`, formerly a trust whitelist); a **libp2p** node (`serve`) keyed by the
+  `recover`); a friend list (`friend …`, formerly a trust whitelist); a **libp2p** node (`daemon`) keyed by the
   Ed25519 identity with object + push protocols (originally over a Kademlia DHT, since
   removed in favour of talking to friends directly); `publish`
   replicates a snapshot's objects (bytes, DAG nodes, chunks) to friends and posts a

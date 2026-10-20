@@ -195,7 +195,7 @@ cross-repository coordination or registry is needed — the filesystem refcount 
 A node keeps the list of its friends in `~/.config/hidage/friends.json` (no secrets):
 per friend, the Ed25519 public key, a local nickname, the last known addresses, the quota
 this node gives them, and when it last saw them. hidage is friends-only, so this list is
-the whole trust model: `serve` refuses inbound connections from any other key (a libp2p
+the whole trust model: `daemon` refuses inbound connections from any other key (a libp2p
 connection gater checked once the remote is authenticated) and accepts pushes only from
 friends, and `publish` pushes to friends.
 
@@ -222,7 +222,7 @@ is re-read when its file changes, so `friend add/rm` applies to a running node.
 **Reaching friends across NATs.** Nodes listen on TCP and QUIC (IPv4 and IPv6) and try, in
 order: a direct connection (UPnP/NAT-PMP port mapping helps home routers), then a
 connection through a **friend's circuit relay**, which DCUtR hole punching then tries to
-upgrade to a direct one. `serve` offers the relay service to friends only (an ACL over both
+upgrade to a direct one. `daemon` offers the relay service to friends only (an ACL over both
 ends of the circuit) and with no time or data limit, so a relayed link can carry backup
 data when hole punching fails. A node that decides it is behind a NAT reserves slots on
 friends' relays and advertises `/p2p/<relay>/p2p-circuit` addresses, which end up in its
@@ -231,7 +231,7 @@ treats a node with no public IP on any interface as private, rather than waiting
 AutoNAT, which needs several peers to agree and so can stay undecided in a small group;
 `public` (port forwarded) and `private` override it. libp2p only advertises circuit
 addresses through relays with a public IP, so at least one friend must be reachable; a
-small VPS running `serve` works as the group's relay, and overlay networks (Tailscale,
+small VPS running `daemon` works as the group's relay, and overlay networks (Tailscale,
 WireGuard, ZeroTier) work as plain addresses.
 
 A node is a **libp2p host whose peer ID is its Ed25519 identity** (so a recovered node has
@@ -254,7 +254,7 @@ only to the friends in its list, and they are few enough to ask directly. It spe
   addresses (with a timestamp sequence number). A friend can ask a node for its own record
   or for the last record it holds of another of its friends, so a friend whose address
   changed can still be found through the others. Records are verified against the
-  subject's key and only a newer one replaces an older one. `serve` reconnects to friends
+  subject's key and only a newer one replaces an older one. `daemon` reconnects to friends
   every few minutes and refreshes their records.
 
 An owner can back up many folders under one identity, so the head doesn't name a single
@@ -279,6 +279,25 @@ them, rebuilds the objects, and runs the ordinary restore walk against a local c
 <contact card | multiaddr>` names a friend to recover from.
 
 ---
+
+## The daemon (`hidage daemon`)
+
+One long-running process does everything that has to happen while you are not looking:
+it hosts friends' sets and answers their object, audit and head requests, relays for them,
+reconnects to them every few minutes (refreshing address records and completing pending
+pairings), reaps expired sets and old trash hourly, and, with the keyring unlocked, backs
+up the `folders` listed in `config.toml`: every `backup.every` it snapshots each folder if
+it changed (`SnapshotIfChanged`, so idle folders don't pile up identical snapshots),
+publishes when the snapshot changed or the last publish is older than `renew_every`
+(renewal sends only the set's list, see below), and audits friends whose last audit is
+older than `audit_every`.
+
+Backups need the master key; hosting needs only the identity key. The passphrase comes
+from `HIDAGE_PASSPHRASE`, `passphrase_command` or the terminal; on every unlock the daemon
+caches the identity seed in `identity.key` (0600). A later start with no passphrase source
+(e.g. at boot) runs **locked** from that cache: it keeps hosting for friends but takes no
+backups, and records this in `node.json` so `status` can say so. `daemon --install` writes a
+systemd user unit or launchd agent.
 
 ## Durability: hosting, audits, erasure coding
 
