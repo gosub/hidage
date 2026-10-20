@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/multiformats/go-multiaddr"
 )
@@ -17,7 +18,14 @@ import (
 // CardPrefix starts every encoded contact card.
 const CardPrefix = "hidage1:"
 
-const cardKind = 1 // payload kind byte: a plain contact card
+// Payload kind bytes.
+const (
+	cardKind   = 1 // a plain contact card
+	inviteKind = 2 // a contact card plus a single-use pairing token
+)
+
+// TokenSize is the length of an invite's pairing token.
+const TokenSize = 16
 
 // checksumSize is the truncated SHA-256 appended to catch copy-paste damage.
 const checksumSize = 4
@@ -30,7 +38,15 @@ type Card struct {
 	PubKey   ed25519.PublicKey
 	Nickname string
 	Addrs    []multiaddr.Multiaddr
+
+	// Token and Expires are set on an invite (see Invites): presenting the token
+	// to the inviter's node before it expires makes the two nodes friends.
+	Token   []byte
+	Expires time.Time
 }
+
+// IsInvite reports whether the card carries a pairing token.
+func (c *Card) IsInvite() bool { return len(c.Token) == TokenSize }
 
 // AddrStrings returns the card's addresses as strings.
 func (c *Card) AddrStrings() []string {
@@ -45,15 +61,24 @@ func (c *Card) AddrStrings() []string {
 // with a checksum.
 //
 // Payload: kind byte, 32-byte public key, nickname (uvarint length + bytes),
-// address count (uvarint), then each address as uvarint length + multiaddr bytes.
+// address count (uvarint), then each address as uvarint length + multiaddr bytes;
+// an invite then adds the token and its expiry (uvarint unix seconds).
 func (c *Card) Encode() string {
 	var buf bytes.Buffer
-	buf.WriteByte(cardKind)
+	if c.IsInvite() {
+		buf.WriteByte(inviteKind)
+	} else {
+		buf.WriteByte(cardKind)
+	}
 	buf.Write(c.PubKey)
 	writeBytes(&buf, []byte(c.Nickname))
 	writeUvarint(&buf, uint64(len(c.Addrs)))
 	for _, a := range c.Addrs {
 		writeBytes(&buf, a.Bytes())
+	}
+	if c.IsInvite() {
+		buf.Write(c.Token)
+		writeUvarint(&buf, uint64(c.Expires.Unix()))
 	}
 	sum := sha256.Sum256(buf.Bytes())
 	buf.Write(sum[:checksumSize])
@@ -80,7 +105,7 @@ func DecodeCard(s string) (*Card, error) {
 	}
 	r := bytes.NewReader(body)
 	kind, _ := r.ReadByte()
-	if kind != cardKind {
+	if kind != cardKind && kind != inviteKind {
 		return nil, fmt.Errorf("unsupported contact card kind %d (newer hidage?)", kind)
 	}
 	c := &Card{PubKey: make([]byte, ed25519.PublicKeySize)}
@@ -106,6 +131,17 @@ func DecodeCard(s string) (*Card, error) {
 			return nil, fmt.Errorf("contact card has a bad address: %w", err)
 		}
 		c.Addrs = append(c.Addrs, a)
+	}
+	if kind == inviteKind {
+		c.Token = make([]byte, TokenSize)
+		if _, err := io.ReadFull(r, c.Token); err != nil {
+			return nil, errors.New("invite is truncated")
+		}
+		exp, err := binary.ReadUvarint(r)
+		if err != nil {
+			return nil, errors.New("invite is truncated")
+		}
+		c.Expires = time.Unix(int64(exp), 0)
 	}
 	return c, nil
 }

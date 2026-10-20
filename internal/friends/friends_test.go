@@ -1,12 +1,14 @@
 package friends
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/multiformats/go-multiaddr"
 )
@@ -162,5 +164,41 @@ func TestApplyAddrs(t *testing.T) {
 	}
 	if ok, _ := b.ApplyAddrs(strings.Repeat("ab", 32), []string{"/ip4/192.0.2.9/tcp/1"}, 99, nil); ok {
 		t.Fatal("record applied for a non-friend")
+	}
+}
+
+func TestInviteRoundTripAndConsume(t *testing.T) {
+	dir := t.TempDir()
+	iv := OpenInvites(filepath.Join(dir, "invites.json"))
+	if iv.Pending() {
+		t.Fatal("no invites yet")
+	}
+	token, exp, err := iv.Create("bob", 7, time.Hour)
+	if err != nil || !iv.Pending() {
+		t.Fatalf("create: %v", err)
+	}
+	c := newCard(t, "alice", "/ip4/192.0.2.1/tcp/4001")
+	c.Token, c.Expires = token, exp
+	got, err := DecodeCard(c.Encode())
+	if err != nil || !got.IsInvite() || !bytes.Equal(got.Token, token) || !got.Expires.Equal(exp) {
+		t.Fatalf("invite round trip: %+v, %v", got, err)
+	}
+	if plain, _ := DecodeCard(newCard(t, "x").Encode()); plain.IsInvite() {
+		t.Fatal("plain card decoded as invite")
+	}
+
+	inv, ok := iv.Consume(token)
+	if !ok || inv.Nickname != "bob" || inv.Give != 7 {
+		t.Fatalf("consume = %+v, %v", inv, ok)
+	}
+	if _, ok := iv.Consume(token); ok {
+		t.Fatal("token used twice")
+	}
+	if iv.Pending() {
+		t.Fatal("consumed invite still pending")
+	}
+	expired, _, _ := iv.Create("", 1, -time.Second)
+	if _, ok := iv.Consume(expired); ok {
+		t.Fatal("expired token accepted")
 	}
 }
