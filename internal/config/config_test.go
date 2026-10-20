@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,5 +86,29 @@ func TestInterval(t *testing.T) {
 		if s := Interval(d).String(); s != want {
 			t.Errorf("String(%v) = %q, want %q", d, s, want)
 		}
+	}
+}
+
+func TestAddFolder(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv(DataStoreEnv, filepath.Join(dir, "store"))
+	p, _ := Ensure()
+	a, b := filepath.Join(dir, "docs"), filepath.Join(dir, "photos")
+	for _, f := range []string{a, b} {
+		if added, err := AddFolder(p, f); err != nil || !added {
+			t.Fatalf("AddFolder(%s) = %v, %v", f, added, err)
+		}
+	}
+	if added, _ := AddFolder(p, a); added {
+		t.Fatal("folder added twice")
+	}
+	s, err := Load()
+	if err != nil || len(s.Backup.FolderPaths()) != 2 || s.Backup.FolderPaths()[1] != b {
+		t.Fatalf("folders = %v, %v", s.Backup.Folders, err)
+	}
+	raw, _ := os.ReadFile(p.ConfigPath)
+	if !strings.Contains(string(raw), "# How often the daemon snapshots them") {
+		t.Fatal("comments were lost")
 	}
 }

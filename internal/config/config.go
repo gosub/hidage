@@ -166,16 +166,23 @@ func Load() (Settings, error) {
 }
 
 func load() (Settings, error) {
-	s := Defaults()
 	p, err := Resolve()
 	if err != nil {
-		return s, err
+		return Defaults(), err
 	}
-	if _, err := toml.DecodeFile(p.ConfigPath, &s); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return s, fmt.Errorf("read %s: %w", p.ConfigPath, err)
+	return loadFile(p.ConfigPath)
+}
+
+func loadFile(path string) (Settings, error) {
+	s := Defaults()
+	if _, err := toml.DecodeFile(path, &s); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return s, fmt.Errorf("read %s: %w", path, err)
 	}
 	return s, nil
 }
+
+// reset forgets the cached settings, so the next Load re-reads the file.
+func reset() { loadOnce = sync.Once{} }
 
 // DataStoreDir returns the node-wide chunk store path: $HIDAGE_STORE if set,
 // else the config file's store, else the legacy /opt location if it exists,
