@@ -45,13 +45,23 @@ func (n *Node) EnableDHT(ctx context.Context) error {
 	return nil
 }
 
-// Bootstrap seeds the routing table and connects to any provided bootstrap
-// peers (full multiaddrs ending in /p2p/<id>).
+// Bootstrap seeds the routing table and connects to the provided bootstrap
+// peers (full multiaddrs ending in /p2p/<id>). Unreachable peers are skipped; it
+// fails only if peers were given and none could be reached.
 func (n *Node) Bootstrap(ctx context.Context, peers []string) error {
+	var firstErr error
+	ok := 0
 	for _, addr := range peers {
 		if _, err := n.Connect(ctx, addr); err != nil {
-			return err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
+		ok++
+	}
+	if len(peers) > 0 && ok == 0 {
+		return firstErr
 	}
 	return n.dht.Bootstrap(ctx)
 }

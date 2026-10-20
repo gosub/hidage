@@ -17,6 +17,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
+	manet "github.com/multiformats/go-multiaddr/net"
 
 	"hidage/internal/identity"
 )
@@ -79,6 +80,75 @@ func (n *Node) Addrs() []string {
 		out = append(out, a.String())
 	}
 	return out
+}
+
+// ListenAddrs returns the node's addresses worth handing to a friend (without
+// the /p2p/<id> suffix): loopback and link-local addresses are dropped unless
+// nothing else is available.
+func (n *Node) ListenAddrs() []string {
+	return ShareableAddrs(n.host.Addrs())
+}
+
+// ShareableAddrs filters addrs down to those reachable from another machine,
+// falling back to all of them if none are.
+func ShareableAddrs(addrs []multiaddr.Multiaddr) []string {
+	var out, all []string
+	for _, a := range addrs {
+		all = append(all, a.String())
+		if !manet.IsIPLoopback(a) && !manet.IsIP6LinkLocal(a) {
+			out = append(out, a.String())
+		}
+	}
+	if len(out) == 0 {
+		return all
+	}
+	return out
+}
+
+// ResolveListenAddrs expands unspecified listen addresses (0.0.0.0, ::) over this
+// machine's interfaces, for describing a node that is not currently running.
+func ResolveListenAddrs(listen []string) []string {
+	ifaces, err := manet.InterfaceMultiaddrs()
+	if err != nil {
+		return nil
+	}
+	var resolved []multiaddr.Multiaddr
+	for _, l := range listen {
+		ma, err := multiaddr.NewMultiaddr(l)
+		if err != nil {
+			continue
+		}
+		rs, err := manet.ResolveUnspecifiedAddress(ma, ifaces)
+		if err != nil {
+			continue
+		}
+		resolved = append(resolved, rs...)
+	}
+	return ShareableAddrs(resolved)
+}
+
+// ConnectAddrs connects to a peer known by ID and a list of addresses (without
+// the /p2p suffix), falling back to a DHT lookup when none of them work.
+func (n *Node) ConnectAddrs(ctx context.Context, pid peer.ID, addrs []string) error {
+	info := peer.AddrInfo{ID: pid}
+	for _, a := range addrs {
+		if ma, err := multiaddr.NewMultiaddr(a); err == nil {
+			info.Addrs = append(info.Addrs, ma)
+		}
+	}
+	var err error
+	if len(info.Addrs) > 0 {
+		if err = n.host.Connect(ctx, info); err == nil {
+			return nil
+		}
+	}
+	if n.dht != nil {
+		return n.DialPeerID(ctx, pid)
+	}
+	if err == nil {
+		err = fmt.Errorf("no known address for %s", pid)
+	}
+	return err
 }
 
 // ConnectInfo connects to a peer given its discovered address info.
