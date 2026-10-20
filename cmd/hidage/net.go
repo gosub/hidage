@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/multiformats/go-multiaddr"
 	"github.com/spf13/cobra"
 
 	"hidage/internal/account"
@@ -327,6 +328,11 @@ func newPublishCmd() *cobra.Command {
 				ReleaseID: relID,
 				UpdatedAt: time.Now().UTC(),
 			})
+			// Seal the friend list into the manifest, so recovering from any one
+			// friend finds all of them.
+			if err := manifest.SetRoster(kr.MasterKey(), rosterOf(book)); err != nil {
+				return err
+			}
 			manifestBytes, err := manifest.Bytes()
 			if err != nil {
 				return err
@@ -517,7 +523,7 @@ func fetchManifest(ctx context.Context, node *p2p.Node, peers []peer.ID) *accoun
 func newNetRestoreCmd() *cobra.Command {
 	var from []string
 	var repoSel string
-	var all bool
+	var all, filesOnly bool
 	cmd := &cobra.Command{
 		Use:   "net-restore <out-dir>",
 		Short: "Recover backups from your friends (head → account manifest → shards)",
@@ -538,9 +544,24 @@ func newNetRestoreCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			mid := node.ResolveHead(ctx, sources)
-			if mid == "" {
-				return fmt.Errorf("none of the %d friend(s) reached holds a backup of yours", len(sources))
+			manifest, err := resolveManifest(ctx, node, sources)
+			if err != nil {
+				return err
+			}
+			// The manifest's roster names friends this machine may not know yet
+			// (it may be brand new): add them and ask them too, in case one holds
+			// a newer head or shards the others lack.
+			if added := importRoster(manifest, kr.MasterKey()); added > 0 {
+				fmt.Printf("Restored %d friend(s) from your backup's friend list.\n", added)
+				book, err := loadFriends()
+				if err != nil {
+					return err
+				}
+				more := peerIDs(reachFriends(ctx, node, book, false))
+				sources = mergePeers(sources, more)
+				if m, err := resolveManifest(ctx, node, sources); err == nil {
+					manifest = m
+				}
 			}
 
 			cache, err := store.NewKeyedStore(filepath.Join(config.DataStoreDir(), "cache"))
@@ -548,18 +569,6 @@ func newNetRestoreCmd() *cobra.Command {
 				return err
 			}
 			ns := netstore.New(node, cache, sources)
-
-			manBytes, err := ns.Get(mid)
-			if err != nil {
-				return fmt.Errorf("fetch account manifest: %w", err)
-			}
-			if store.ID(manBytes) != mid {
-				return fmt.Errorf("account manifest failed integrity check")
-			}
-			manifest, err := account.Parse(manBytes)
-			if err != nil {
-				return err
-			}
 			if len(manifest.Entries) == 0 {
 				return fmt.Errorf("you have no published backups")
 			}
@@ -586,10 +595,15 @@ func newNetRestoreCmd() *cobra.Command {
 			}
 
 			for _, e := range targets {
-				if err := restoreRelease(ns, cache, kr.MasterKey(), e.ReleaseID, args[0]); err != nil {
+				folder, err := restoreRelease(ns, cache, kr.MasterKey(), e, args[0], !filesOnly)
+				if err != nil {
 					return fmt.Errorf("restore %q: %w", e.Name, err)
 				}
-				fmt.Printf("Recovered %q into %s\n", e.Name, args[0])
+				fmt.Printf("Recovered %q into %s\n", e.Name, folder)
+			}
+			if !filesOnly {
+				fmt.Println("The restored folders are hidage repositories again: run `hidage publish` in each")
+				fmt.Println("to resume backing up (it only renews what your friends already hold).")
 			}
 			return nil
 		},
@@ -597,6 +611,7 @@ func newNetRestoreCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&from, "from", nil, "also recover from this friend (contact card or /p2p multiaddr), e.g. on a new machine")
 	cmd.Flags().StringVar(&repoSel, "repo", "", "which backup to restore (name or repo-id prefix)")
 	cmd.Flags().BoolVar(&all, "all", false, "restore every backup in the account")
+	cmd.Flags().BoolVar(&filesOnly, "files-only", false, "restore the files only, without making the folders repositories again")
 	return cmd
 }
 
@@ -622,33 +637,118 @@ func recoverySources(ctx context.Context, node *p2p.Node, from []string) ([]peer
 }
 
 // restoreRelease fetches a Release, reassembles its objects from K-of-M shards,
-// and restores the snapshot into outDir (under its source name).
-func restoreRelease(ns *netstore.Store, cache *store.KeyedStore, masterKey []byte, relID, outDir string) error {
-	relBytes, err := ns.Get(relID)
+// and restores the snapshot into outDir (under its source name), returning the
+// restored folder. With adopt, the folder becomes the original repository again
+// (same repo id, snapshot and objects), unless it already is one.
+func restoreRelease(ns *netstore.Store, cache *store.KeyedStore, masterKey []byte, e account.Entry, outDir string, adopt bool) (string, error) {
+	relBytes, err := ns.Get(e.ReleaseID)
 	if err != nil {
-		return fmt.Errorf("fetch release: %w", err)
+		return "", fmt.Errorf("fetch release: %w", err)
 	}
-	if store.ID(relBytes) != relID {
-		return fmt.Errorf("release failed integrity check")
+	if store.ID(relBytes) != e.ReleaseID {
+		return "", fmt.Errorf("release failed integrity check")
 	}
 	var rel pack.Release
 	if err := json.Unmarshal(relBytes, &rel); err != nil {
-		return err
+		return "", err
 	}
 	objects, err := pack.Reassemble(&rel, ns.Get)
 	if err != nil {
-		return fmt.Errorf("reassemble: %w", err)
+		return "", fmt.Errorf("reassemble: %w", err)
 	}
 	for id, data := range objects {
 		if err := cache.Put(id, data); err != nil {
-			return err
+			return "", err
 		}
 	}
 	snap, err := repo.ParseSnapshot(objects[rel.SnapshotID])
 	if err != nil {
-		return err
+		return "", err
 	}
-	return repo.RestoreWith(dag.NewLoader(cache, cache, masterKey), snap, outDir)
+	l := dag.NewLoader(cache, cache, masterKey)
+	if err := repo.RestoreWith(l, snap, outDir); err != nil {
+		return "", err
+	}
+	name, err := repo.RootName(l, snap)
+	if err != nil {
+		return outDir, nil
+	}
+	folder := filepath.Join(outDir, name)
+	if adopt && !repo.Exists(folder) {
+		if _, err := repo.Adopt(folder, masterKey, config.DataStoreDir(), e.RepoID, objects[rel.SnapshotID], cache.Get); err != nil {
+			return "", err
+		}
+	}
+	return folder, nil
+}
+
+// resolveManifest fetches and verifies this node's newest account manifest from
+// sources.
+func resolveManifest(ctx context.Context, node *p2p.Node, sources []peer.ID) (*account.Manifest, error) {
+	mid := node.ResolveHead(ctx, sources)
+	if mid == "" {
+		return nil, fmt.Errorf("none of the %d friend(s) reached holds a backup of yours", len(sources))
+	}
+	data, err := node.GetObject(ctx, mid, sources)
+	if err != nil {
+		return nil, fmt.Errorf("fetch account manifest: %w", err)
+	}
+	if store.ID(data) != mid {
+		return nil, fmt.Errorf("account manifest failed integrity check")
+	}
+	return account.Parse(data)
+}
+
+// rosterOf lists the friends for the manifest's sealed roster.
+func rosterOf(book *friends.Book) []account.RosterEntry {
+	var out []account.RosterEntry
+	for _, f := range book.List() {
+		out = append(out, account.RosterEntry{PubKey: f.PubKey, Nickname: f.Nickname, Addrs: f.Addrs, Give: f.Give})
+	}
+	return out
+}
+
+// importRoster adds the manifest's roster friends that this machine doesn't
+// know yet, returning how many it added.
+func importRoster(m *account.Manifest, masterKey []byte) int {
+	roster, err := m.OpenRoster(masterKey)
+	if err != nil || len(roster) == 0 {
+		return 0
+	}
+	book, err := loadFriends()
+	if err != nil {
+		return 0
+	}
+	added := 0
+	for _, e := range roster {
+		if book.IsFriend(e.PubKey) {
+			continue
+		}
+		card := &friends.Card{PubKey: mustPub(e.PubKey), Nickname: e.Nickname}
+		for _, a := range e.Addrs {
+			if ma, err := multiaddr.NewMultiaddr(a); err == nil {
+				card.Addrs = append(card.Addrs, ma)
+			}
+		}
+		if _, isNew, err := book.Add(card, e.Nickname, e.Give); err == nil && isNew {
+			added++
+		}
+	}
+	return added
+}
+
+// mergePeers appends the peers in more that are not already in base.
+func mergePeers(base, more []peer.ID) []peer.ID {
+	seen := map[peer.ID]bool{}
+	for _, p := range base {
+		seen[p] = true
+	}
+	for _, p := range more {
+		if !seen[p] {
+			base, seen[p] = append(base, p), true
+		}
+	}
+	return base
 }
 
 func waitForSignal() {

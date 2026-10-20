@@ -7,9 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"hidage/internal/account"
 	"hidage/internal/p2p"
-	"hidage/internal/store"
 )
 
 func newNetListCmd() *cobra.Command {
@@ -34,18 +32,7 @@ func newNetListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			mid := node.ResolveHead(ctx, sources)
-			if mid == "" {
-				return fmt.Errorf("none of the %d friend(s) reached holds a backup of yours", len(sources))
-			}
-			data, err := node.GetObject(ctx, mid, sources)
-			if err != nil {
-				return fmt.Errorf("fetch account manifest: %w", err)
-			}
-			if store.ID(data) != mid {
-				return fmt.Errorf("account manifest failed integrity check")
-			}
-			manifest, err := account.Parse(data)
+			manifest, err := resolveManifest(ctx, node, sources)
 			if err != nil {
 				return err
 			}
