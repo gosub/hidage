@@ -90,7 +90,7 @@ func newServeCmd() *cobra.Command {
 			node, err := p2p.New(kr.Identity(), nil, listen,
 				p2p.WithInboundFilter(admit), // friends only (and invitees while an invite is open)
 				p2p.WithFriends(isFriend),
-				p2p.WithRelayService(isFriend),  // relay for friends while reachable
+				p2p.WithRelayService(isFriend), // relay for friends while reachable
 				p2p.WithRelayCandidates(func() []peer.AddrInfo { return friendAddrInfos(book) }),
 				p2p.WithReachability(reach))
 			if err != nil {
