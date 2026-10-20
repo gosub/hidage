@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Size is a byte count written in config and on the command line as a number
@@ -67,3 +68,33 @@ func (s *Size) UnmarshalText(b []byte) error {
 func (s Size) MarshalText() ([]byte, error) { return []byte(FormatSize(int64(s))), nil }
 
 func (s Size) String() string { return FormatSize(int64(s)) }
+
+// Interval is a duration written as "hourly", "daily", "weekly" or a Go
+// duration such as "30m" or "6h".
+type Interval time.Duration
+
+// UnmarshalText parses an interval.
+func (i *Interval) UnmarshalText(b []byte) error {
+	switch strings.ToLower(strings.TrimSpace(string(b))) {
+	case "hourly":
+		*i = Interval(time.Hour)
+	case "daily":
+		*i = Interval(24 * time.Hour)
+	case "weekly":
+		*i = Interval(7 * 24 * time.Hour)
+	default:
+		d, err := time.ParseDuration(strings.TrimSpace(string(b)))
+		if err != nil || d <= 0 {
+			return fmt.Errorf("invalid interval %q (want hourly, daily, weekly or e.g. 6h)", b)
+		}
+		*i = Interval(d)
+	}
+	return nil
+}
+
+// MarshalText renders the interval as a Go duration.
+func (i Interval) MarshalText() ([]byte, error) { return []byte(i.String()), nil }
+
+func (i Interval) String() string {
+	return strings.TrimSuffix(strings.TrimSuffix(time.Duration(i).String(), "0s"), "0m")
+}

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -114,6 +115,23 @@ type Backup struct {
 	Redundancy float64 `toml:"redundancy"`
 	// MinFriends refuses to publish to fewer reachable friends than this.
 	MinFriends int `toml:"min_friends"`
+	// Folders are backed up on schedule by "hidage daemon".
+	Folders []string `toml:"folders"`
+	// Every is how often the daemon snapshots folders and publishes changes.
+	Every Interval `toml:"every"`
+	// RenewEvery re-publishes unchanged folders so friends keep them.
+	RenewEvery Interval `toml:"renew_every"`
+	// AuditEvery is how often to check that friends still hold the data.
+	AuditEvery Interval `toml:"audit_every"`
+}
+
+// FolderPaths returns the configured folders with "~/" expanded.
+func (b Backup) FolderPaths() []string {
+	out := make([]string, len(b.Folders))
+	for i, f := range b.Folders {
+		out[i] = expandHome(f)
+	}
+	return out
 }
 
 // Defaults returns the settings used when config.toml is absent.
@@ -127,7 +145,10 @@ func Defaults() Settings {
 		},
 		Reachability: "auto",
 		Hosting:      Hosting{DefaultGive: 100 << 30, LeaseDays: 90, TrashDays: 30},
-		Backup:       Backup{Redundancy: 2.0, MinFriends: 1},
+		Backup: Backup{
+			Redundancy: 2.0, MinFriends: 1, Folders: []string{},
+			Every: Interval(time.Hour), RenewEvery: Interval(24 * time.Hour), AuditEvery: Interval(24 * time.Hour),
+		},
 	}
 }
 
@@ -207,7 +228,7 @@ func WriteTemplate(p Paths) (bool, error) {
 	}
 	body := fmt.Sprintf(template, d.Name, DataStoreDir(), strings.Join(listen, ", "), d.Reachability,
 		FormatSize(int64(d.Hosting.DefaultGive)), d.Hosting.LeaseDays, d.Hosting.TrashDays,
-		d.Backup.Redundancy, d.Backup.MinFriends)
+		d.Backup.Redundancy, d.Backup.MinFriends, d.Backup.Every, d.Backup.RenewEvery, d.Backup.AuditEvery)
 	if err := os.WriteFile(p.ConfigPath, []byte(body), 0o600); err != nil {
 		return false, fmt.Errorf("write %s: %w", p.ConfigPath, err)
 	}
@@ -250,4 +271,12 @@ trash_days = %d
 redundancy = %.1f
 # Refuse to publish to fewer reachable friends than this.
 min_friends = %d
+# Folders "hidage daemon" backs up on schedule, e.g. ["~/Documents", "~/projects"].
+folders = []
+# How often the daemon snapshots them and publishes what changed.
+every = %q
+# Re-publish unchanged folders this often, so friends keep them (see lease_days).
+renew_every = %q
+# How often to check that friends still hold your data.
+audit_every = %q
 `

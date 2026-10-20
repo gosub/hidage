@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -61,7 +62,26 @@ func TestTemplateRoundTrip(t *testing.T) {
 	want := Defaults()
 	want.Store = os.Getenv(DataStoreEnv)
 	if got.Name != want.Name || got.Store != want.Store || len(got.Listen) != len(want.Listen) || got.Listen[3] != want.Listen[3] || got.Reachability != want.Reachability ||
-		got.Hosting != want.Hosting || got.Backup != want.Backup {
+		got.Hosting != want.Hosting || got.Backup.Redundancy != want.Backup.Redundancy ||
+		got.Backup.MinFriends != want.Backup.MinFriends || len(got.Backup.Folders) != 0 ||
+		got.Backup.Every != want.Backup.Every || got.Backup.RenewEvery != want.Backup.RenewEvery ||
+		got.Backup.AuditEvery != want.Backup.AuditEvery {
 		t.Fatalf("template decodes to %+v, want %+v", got, want)
+	}
+}
+
+func TestInterval(t *testing.T) {
+	for in, want := range map[string]time.Duration{"hourly": time.Hour, "daily": 24 * time.Hour, "30m": 30 * time.Minute, "6h": 6 * time.Hour} {
+		var i Interval
+		if err := i.UnmarshalText([]byte(in)); err != nil || time.Duration(i) != want {
+			t.Errorf("%q = %v, %v", in, time.Duration(i), err)
+		}
+	}
+	var i Interval
+	if i.UnmarshalText([]byte("-1h")) == nil || i.UnmarshalText([]byte("often")) == nil {
+		t.Error("bad intervals accepted")
+	}
+	if s := Interval(24 * time.Hour).String(); s != "24h" {
+		t.Errorf("String = %q", s)
 	}
 }
