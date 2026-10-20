@@ -7,10 +7,12 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/spf13/cobra"
 
 	"hidage/internal/accounting"
 	"hidage/internal/config"
+	"hidage/internal/friends"
 	"hidage/internal/p2p"
 	"hidage/internal/pack"
 	"hidage/internal/repo"
@@ -50,11 +52,10 @@ func newReputationCmd() *cobra.Command {
 }
 
 func newAuditCmd() *cobra.Command {
-	var bootstrap []string
 	var peers []string
 	cmd := &cobra.Command{
 		Use:   "audit",
-		Short: "Challenge storage peers to prove they hold your shards; update reputation + accounting",
+		Short: "Challenge the friends holding this repo's shards to prove they still have them",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kr, err := unlock()
@@ -79,10 +80,16 @@ func newAuditCmd() *cobra.Command {
 			}
 
 			// Regenerate the published shards deterministically so we know the
-			// exact bytes each peer should be able to prove it holds.
-			snap, err := r.Latest()
+			// exact bytes each peer should be able to prove it holds. Audit what
+			// was published, even if newer snapshots were taken since.
+			var snap *repo.Snapshot
+			if dist.SnapshotID != "" {
+				snap, err = r.FindSnapshot(dist.SnapshotID)
+			} else {
+				snap, err = r.Latest() // distribution written before snapshot ids were recorded
+			}
 			if err != nil || snap == nil {
-				return fmt.Errorf("no snapshot to audit")
+				return fmt.Errorf("the published snapshot is no longer here (forgotten?); re-publish before auditing")
 			}
 			objs, err := r.PublishSet(snap)
 			if err != nil {
@@ -94,7 +101,7 @@ func newAuditCmd() *cobra.Command {
 			}
 			relBytes, _ := json.Marshal(rel)
 			if store.ID(relBytes) != dist.ReleaseID {
-				return fmt.Errorf("the snapshot changed since it was published; re-publish before auditing")
+				return fmt.Errorf("the published release can't be regenerated; re-publish before auditing")
 			}
 
 			rep, err := reputation.Load(paths.ReputationPath)
@@ -113,19 +120,39 @@ func newAuditCmd() *cobra.Command {
 			defer node.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
-			if err := node.EnableDHT(ctx); err != nil {
-				return err
-			}
-			if err := joinNetwork(ctx, node, bootstrap); err != nil {
-				return err
+
+			// Whom to audit: the named peers, or every friend holding shards.
+			var targets []peer.ID
+			if len(peers) > 0 {
+				for _, addr := range peers {
+					pid, err := node.Connect(ctx, addr)
+					if err != nil {
+						fmt.Printf("  %s: %v\n", addr, err)
+						continue
+					}
+					targets = append(targets, pid)
+				}
+			} else {
+				book, err := loadFriends()
+				if err != nil {
+					return err
+				}
+				reached := reachFriends(ctx, node, book, true)
+				for pubHex := range dist.Peers {
+					name := pubHex[:12]
+					if f, ok := book.Get(pubHex); ok {
+						name = f.Nickname
+					}
+					if !seenFriend(reached, pubHex) {
+						fmt.Printf("  %s: unreachable, not audited\n", name)
+						continue
+					}
+					pid, _ := friends.PeerIDFromHex(pubHex)
+					targets = append(targets, pid)
+				}
 			}
 
-			for _, addr := range peers {
-				pid, err := node.Connect(ctx, addr)
-				if err != nil {
-					fmt.Printf("  %s: %v\n", addr, err)
-					continue
-				}
+			for _, pid := range targets {
 				pubHex, _ := p2p.PeerPubKeyHex(pid)
 				shardIDs := dist.Peers[pubHex]
 				if len(shardIDs) == 0 {
@@ -154,8 +181,7 @@ func newAuditCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s) (default: your friends)")
-	cmd.Flags().StringArrayVar(&peers, "peer", nil, "storage peer multiaddr(s) to audit")
+	cmd.Flags().StringArrayVar(&peers, "peer", nil, "audit only this peer multiaddr (default: every friend holding shards)")
 	return cmd
 }
 

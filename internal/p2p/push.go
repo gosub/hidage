@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -35,8 +34,7 @@ const maxIDLen = 256
 // once with 0 to gate the connection and again before each object, so a peer's
 // byte budget is enforced *within* a stream, not only between pushes. A nil
 // accept stores from everyone. onStored, if non-nil, is called after a push with
-// the sender's key and the number of bytes stored (for space accounting). Stored
-// objects are re-announced to the DHT.
+// the sender's key and the number of bytes stored (for space accounting).
 func (n *Node) EnablePush(sink Sink, accept func(senderPub []byte, cumulative int64) bool, onStored func(senderPub []byte, bytes int64)) {
 	n.sink = sink
 	n.acceptPush = accept
@@ -82,7 +80,6 @@ func (n *Node) handlePush(s network.Stream) {
 		if err := n.sink.Put(id, data); err != nil {
 			break
 		}
-		n.provideStored(id)
 		stored++
 		storedBytes += int64(len(data))
 	}
@@ -90,16 +87,6 @@ func (n *Node) handlePush(s network.Stream) {
 	if n.onStored != nil && rawPub != nil {
 		n.onStored(rawPub, storedBytes)
 	}
-}
-
-// provideStored best-effort announces a stored object to the DHT.
-func (n *Node) provideStored(id string) {
-	if n.dht == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	_ = n.Provide(ctx, id)
 }
 
 // PushObjects sends objects to peer p, which stores them if its policy allows.

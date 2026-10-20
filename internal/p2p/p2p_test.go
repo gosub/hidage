@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,60 +107,6 @@ func TestObjectRequestToNilBlobsNode(t *testing.T) {
 	}
 }
 
-func TestDHTProvideAndFind(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
-	defer cancel()
-
-	storeA, _ := store.NewFSStore(t.TempDir())
-	data := []byte("discoverable object")
-	id, _ := storeA.Put(data)
-
-	a := newNode(t, storeA)
-	storeB, _ := store.NewFSStore(t.TempDir())
-	b := newNode(t, storeB)
-
-	if err := a.EnableDHT(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.EnableDHT(ctx); err != nil {
-		t.Fatal(err)
-	}
-	// B bootstraps off A; both seed routing tables.
-	if err := b.Bootstrap(ctx, a.Addrs()); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.Bootstrap(ctx, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	// Provide from A and discover from B, polling until the record propagates.
-	var found bool
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) && !found {
-		_ = a.Provide(ctx, id)
-		provs, _ := b.FindProviders(ctx, id)
-		for _, p := range provs {
-			if p.ID == a.ID() {
-				found = true
-			}
-		}
-		if !found {
-			time.Sleep(500 * time.Millisecond)
-		}
-	}
-	if !found {
-		t.Fatal("B did not discover A as a provider via the DHT")
-	}
-
-	got, err := b.FetchObject(ctx, a.ID(), id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, data) {
-		t.Fatal("fetched object via DHT-discovered provider does not match")
-	}
-}
-
 func newNodeID(t *testing.T, blobs Blobs) (*Node, identity.Identity) {
 	t.Helper()
 	id, err := identity.Generate()
@@ -174,26 +121,19 @@ func newNodeID(t *testing.T, blobs Blobs) (*Node, identity.Identity) {
 	return n, id
 }
 
-func TestPushTrustAndHead(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+func TestPushAndFetch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	// Storage node S: serves and accepts pushes into a sink.
 	sink, _ := store.NewKeyedStore(t.TempDir())
 	s, _ := newNodeID(t, sink)
-	s.EnableDHT(ctx)
 	s.EnablePush(sink, nil, nil) // accept from anyone
 
-	// Owner node A.
-	emptyA, _ := store.NewFSStore(t.TempDir())
-	a, idA := newNodeID(t, emptyA)
-	a.EnableDHT(ctx)
-	if err := a.Bootstrap(ctx, s.Addrs()); err != nil {
+	a, _ := newNodeID(t, nil)
+	if _, err := a.Connect(ctx, s.Addrs()[0]); err != nil {
 		t.Fatal(err)
 	}
-	s.Bootstrap(ctx, nil)
-
-	// A pushes objects to S.
 	objs := map[string][]byte{}
 	for _, d := range [][]byte{[]byte("obj-one"), []byte("obj-two")} {
 		objs[store.ID(d)] = d
@@ -205,89 +145,119 @@ func TestPushTrustAndHead(t *testing.T) {
 	if stored != len(objs) {
 		t.Fatalf("stored %d, want %d", stored, len(objs))
 	}
-	// S now serves them back to A.
+	// S now serves them back; GetObject tries the given peers in turn.
+	other, _ := newNodeID(t, nil)
+	a.Connect(ctx, other.Addrs()[0])
 	for id, want := range objs {
-		got, err := a.FetchObject(ctx, s.ID(), id)
+		got, err := a.GetObject(ctx, id, []peer.ID{other.ID(), s.ID()})
 		if err != nil || string(got) != string(want) {
-			t.Fatalf("fetch %s: %v", id, err)
+			t.Fatalf("get %s: %v", id, err)
 		}
 	}
-
-	// Head pointer: A publishes, S resolves it.
-	if _, err := a.PutHead(ctx, idA, "snapshot-xyz"); err != nil {
-		t.Fatal(err)
-	}
-	var head string
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if head, _ = s.GetHead(ctx, idA.Public); head == "snapshot-xyz" {
-			break
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	if head != "snapshot-xyz" {
-		t.Fatalf("GetHead = %q, want snapshot-xyz", head)
+	if _, err := a.GetObject(ctx, store.ID([]byte("nope")), []peer.ID{s.ID()}); !errors.Is(err, ErrObjectNotFound) {
+		t.Fatalf("missing object: err = %v", err)
 	}
 }
 
-func TestHeadPushAndRepublish(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+func TestHeadPushAndResolve(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	// Storage node S persists pushed head records; owner A hands one over.
-	sink, _ := store.NewKeyedStore(t.TempDir())
-	s, _ := newNodeID(t, sink)
-	s.EnableDHT(ctx)
-	stored := map[string][]byte{}
-	s.EnableHeadStore(func(ownerHex string, val []byte) error {
-		stored[ownerHex] = val
-		return nil
-	})
+	// Two friends S1, S2 keep pushed head records; owner A hands records over.
+	newHolder := func() (*Node, map[string][]byte) {
+		n, _ := newNodeID(t, nil)
+		stored := map[string][]byte{}
+		n.EnableHeadStore(
+			func(ownerHex string, val []byte) error { stored[ownerHex] = val; return nil },
+			func(ownerHex string) ([]byte, error) { return stored[ownerHex], nil })
+		return n, stored
+	}
+	s1, stored1 := newHolder()
+	s2, _ := newHolder()
 
-	emptyA, _ := store.NewFSStore(t.TempDir())
-	a, idA := newNodeID(t, emptyA)
-	a.EnableDHT(ctx)
-	if err := a.Bootstrap(ctx, s.Addrs()); err != nil {
+	a, idA := newNodeID(t, nil)
+	for _, s := range []*Node{s1, s2} {
+		if _, err := a.Connect(ctx, s.Addrs()[0]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old, _ := SignHead(idA, "manifest-1")
+	if err := a.PushHead(ctx, s1.ID(), old); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Bootstrap(ctx, a.Addrs()); err != nil {
-		t.Fatal(err)
-	}
-	s.WaitForPeers(ctx, 1, 10*time.Second) // S must have a peer to store records at
-
-	val, err := a.PutHead(ctx, idA, "snap-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := a.PushHead(ctx, s.ID(), HeadKey(idA.Public), val); err != nil {
+	newer, _ := SignHead(idA, "manifest-2")
+	if err := a.PushHead(ctx, s2.ID(), newer); err != nil {
 		t.Fatal(err)
 	}
 	ownerHex := hex.EncodeToString(idA.Public)
-	if _, ok := stored[ownerHex]; !ok {
-		t.Fatal("storage node did not persist the pushed head record")
+	if _, ok := stored1[ownerHex]; !ok {
+		t.Fatal("holder did not persist the pushed head record")
 	}
 
-	// A forged record (bad signature) must be rejected (the receiver drops it, so
-	// the client may see no ack — what matters is it is not stored).
-	_ = a.PushHead(ctx, s.ID(), HeadKey(idA.Public), []byte(`{"snapshotID":"evil","createdAt":1,"sig":"AA=="}`))
-	if string(stored[ownerHex]) != string(val) {
-		t.Fatal("forged head record was accepted")
+	// A forged record (bad signature) is not stored.
+	if err := a.PushHead(ctx, s1.ID(), []byte(`{"snapshotID":"evil","createdAt":1,"sig":"AA=="}`)); err == nil {
+		t.Fatal("forged head record was acknowledged")
+	}
+	// Another peer can't set A's head by replaying A's record under its own name.
+	b, _ := newNodeID(t, nil)
+	b.Connect(ctx, s1.Addrs()[0])
+	if err := b.PushHead(ctx, s1.ID(), newer); err == nil {
+		t.Fatal("record signed by someone else was acknowledged")
+	}
+	if string(stored1[ownerHex]) != string(old) {
+		t.Fatal("holder's record for A changed")
 	}
 
-	// S can re-publish the owner-signed record to the DHT on A's behalf.
-	if err := s.RepublishHead(ctx, ownerHex, stored[ownerHex]); err != nil {
-		t.Fatalf("republish: %v", err)
+	// A (e.g. recovering on a new machine, same key) resolves the newest head.
+	if got := a.ResolveHead(ctx, []peer.ID{s1.ID(), s2.ID()}); got != "manifest-2" {
+		t.Fatalf("ResolveHead = %q, want manifest-2", got)
 	}
-	var head string
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if head, _ = a.GetHead(ctx, idA.Public); head == "snap-1" {
-			break
-		}
-		time.Sleep(300 * time.Millisecond)
+	// Holders answer only the owner: B gets nothing for itself.
+	if got := b.ResolveHead(ctx, []peer.ID{s1.ID()}); got != "" {
+		t.Fatalf("B resolved %q, want nothing", got)
 	}
-	if head != "snap-1" {
-		t.Fatalf("GetHead after republish = %q, want snap-1", head)
+}
+
+func TestAddrRecords(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// B knows C's signed record; A asks B for it.
+	b, _ := newNodeID(t, nil)
+	c, _ := newNodeID(t, nil)
+	a, _ := newNodeID(t, nil)
+	cHex, _ := PeerPubKeyHex(c.ID())
+	known := map[string]*AddrRecord{}
+	b.EnableAddrService(func(subject string) *AddrRecord { return known[subject] })
+	c.EnableAddrService(nil)
+
+	// B fetches C's own record directly from C and keeps it.
+	b.Connect(ctx, c.Addrs()[0])
+	rec, err := b.FetchAddrRecord(ctx, c.ID(), cHex)
+	if err != nil || rec == nil || len(rec.Addrs) == 0 {
+		t.Fatalf("self record: %+v, %v", rec, err)
+	}
+	known[cHex] = rec
+
+	a.Connect(ctx, b.Addrs()[0])
+	got, err := a.FetchAddrRecord(ctx, b.ID(), cHex)
+	if err != nil || got == nil || got.Seq != rec.Seq {
+		t.Fatalf("relayed record: %+v, %v", got, err)
+	}
+	if err := a.ConnectAddrs(ctx, c.ID(), got.Addrs); err != nil {
+		t.Fatalf("connect with relayed addresses: %v", err)
+	}
+
+	// A tampered record is rejected.
+	bad := *rec
+	bad.Addrs = []string{"/ip4/203.0.113.9/tcp/1"}
+	known[cHex] = &bad
+	if _, err := a.FetchAddrRecord(ctx, b.ID(), cHex); err == nil {
+		t.Fatal("tampered address record accepted")
+	}
+	// Unknown subjects yield nil.
+	if r, err := a.FetchAddrRecord(ctx, b.ID(), strings.Repeat("ab", 32)); err != nil || r != nil {
+		t.Fatalf("unknown subject: %+v, %v", r, err)
 	}
 }
 

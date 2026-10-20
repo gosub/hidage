@@ -10,7 +10,7 @@ import (
 // PublishSet returns every object needed to restore a snapshot from the network,
 // keyed by content address: the signed snapshot bytes (under the snapshot id),
 // every reachable DAG node (meta store), and every chunk (data store). These are
-// exactly the objects to replicate to peers and announce to the DHT.
+// exactly the objects to replicate to peers.
 func (r *Repo) PublishSet(snap *Snapshot) (map[string][]byte, error) {
 	out := map[string][]byte{}
 

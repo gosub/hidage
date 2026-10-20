@@ -1,9 +1,10 @@
-// Package p2p is hidage's networking layer: a libp2p host whose peer identity is
-// the node's Ed25519 key, a request/response protocol for fetching encrypted
-// objects (chunks, DAG nodes, snapshots) by content address, Kademlia DHT
-// discovery of who holds what, and a signed head pointer so a peer can find an
-// owner's latest snapshot. Objects on the wire are already encrypted/signed, so
-// serving them to untrusted peers reveals nothing.
+// Package p2p is hidage's networking layer between friends: a libp2p host whose
+// peer identity is the node's Ed25519 key, with request/response protocols to
+// push and fetch encrypted objects (chunks, DAG nodes, snapshots, shards) by
+// content address, prove storage (audits), hand over and return signed head
+// pointers, and exchange signed address records so friends whose addresses
+// change can still be found. There is no global discovery: a node talks to the
+// friends it knows. Objects on the wire are already encrypted/signed.
 package p2p
 
 import (
@@ -12,9 +13,9 @@ import (
 	"fmt"
 
 	"github.com/libp2p/go-libp2p"
-	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
@@ -38,7 +39,6 @@ type Node struct {
 	host       host.Host
 	id         identity.Identity
 	blobs      Blobs
-	dht        *dht.IpfsDHT
 	sink       Sink
 	acceptPush func(senderPub []byte, cumulative int64) bool
 	onStored   func(senderPub []byte, bytes int64)
@@ -147,7 +147,7 @@ func ResolveListenAddrs(listen []string) []string {
 }
 
 // ConnectAddrs connects to a peer known by ID and a list of addresses (without
-// the /p2p suffix), falling back to a DHT lookup when none of them work.
+// the /p2p suffix).
 func (n *Node) ConnectAddrs(ctx context.Context, pid peer.ID, addrs []string) error {
 	info := peer.AddrInfo{ID: pid}
 	for _, a := range addrs {
@@ -155,19 +155,15 @@ func (n *Node) ConnectAddrs(ctx context.Context, pid peer.ID, addrs []string) er
 			info.Addrs = append(info.Addrs, ma)
 		}
 	}
-	var err error
-	if len(info.Addrs) > 0 {
-		if err = n.host.Connect(ctx, info); err == nil {
-			return nil
-		}
+	if len(info.Addrs) == 0 {
+		return fmt.Errorf("no known address for %s", pid)
 	}
-	if n.dht != nil {
-		return n.DialPeerID(ctx, pid)
-	}
-	if err == nil {
-		err = fmt.Errorf("no known address for %s", pid)
-	}
-	return err
+	return n.host.Connect(ctx, info)
+}
+
+// Connected reports whether the node has a live connection to p.
+func (n *Node) Connected(p peer.ID) bool {
+	return n.host.Network().Connectedness(p) == network.Connected
 }
 
 // ConnectInfo connects to a peer given its discovered address info.
@@ -193,20 +189,6 @@ func (n *Node) Connect(ctx context.Context, addr string) (peer.ID, error) {
 
 // Close shuts the host down.
 func (n *Node) Close() error { return n.host.Close() }
-
-// PeerIDFromPubKeyHex derives a libp2p peer ID from a hex Ed25519 public key
-// (the format the trust store uses), so a trusted key can be located on the DHT.
-func PeerIDFromPubKeyHex(h string) (peer.ID, error) {
-	raw, err := hex.DecodeString(h)
-	if err != nil {
-		return "", err
-	}
-	pub, err := crypto.UnmarshalEd25519PublicKey(raw)
-	if err != nil {
-		return "", err
-	}
-	return peer.IDFromPublicKey(pub)
-}
 
 // PeerPubKeyHex returns the hex Ed25519 public key for a peer ID (the key is
 // inlined in the ID), matching the format used by the friend list and reputation store.

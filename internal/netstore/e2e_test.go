@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
+
 	"hidage/internal/dag"
 	"hidage/internal/identity"
 	"hidage/internal/keyring"
@@ -72,19 +74,18 @@ func TestEndToEndCrossNodeRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sNode.Close()
-	sNode.EnableDHT(ctx)
 	sNode.EnablePush(sink, nil, nil)
+	heads, _ := store.NewKeyedStore(t.TempDir())
+	sNode.EnableHeadStore(heads.Put, heads.Get)
 
 	// Owner node A: push the object closure to S, publish the head, then leave.
 	aNode, err := p2p.New(idA, nil, []string{"/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	aNode.EnableDHT(ctx)
-	if err := aNode.Bootstrap(ctx, sNode.Addrs()); err != nil {
+	if _, err := aNode.Connect(ctx, sNode.Addrs()[0]); err != nil {
 		t.Fatal(err)
 	}
-	sNode.Bootstrap(ctx, nil)
 
 	stored, err := aNode.PushObjects(ctx, sNode.ID(), pubset)
 	if err != nil {
@@ -93,7 +94,8 @@ func TestEndToEndCrossNodeRecovery(t *testing.T) {
 	if stored != len(pubset) {
 		t.Fatalf("pushed %d objects, S stored %d", len(pubset), stored)
 	}
-	if _, err := aNode.PutHead(ctx, idA, snap.ID); err != nil {
+	head, _ := p2p.SignHead(idA, snap.ID)
+	if err := aNode.PushHead(ctx, sNode.ID(), head); err != nil {
 		t.Fatal(err)
 	}
 	aNode.Close() // the owner's machine is gone
@@ -104,27 +106,19 @@ func TestEndToEndCrossNodeRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer bNode.Close()
-	bNode.EnableDHT(ctx)
-	if err := bNode.Bootstrap(ctx, sNode.Addrs()); err != nil {
+	if _, err := bNode.Connect(ctx, sNode.Addrs()[0]); err != nil {
 		t.Fatal(err)
 	}
 
-	// Resolve the head pointer by the owner's public key.
-	var snapID string
-	deadline := time.Now().Add(40 * time.Second)
-	for time.Now().Before(deadline) {
-		if snapID, _ = bNode.GetHead(ctx, idA.Public); snapID == snap.ID {
-			break
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
+	// The friend hands the owner's head record back to the owner's key.
+	snapID := bNode.ResolveHead(ctx, []peer.ID{sNode.ID()})
 	if snapID != snap.ID {
 		t.Fatalf("recovered head %q, want %q", snapID, snap.ID)
 	}
 
 	// Pull the snapshot + walk the DAG, fetching every object from the network.
 	cache, _ := store.NewKeyedStore(t.TempDir())
-	ns := netstore.New(bNode, cache)
+	ns := netstore.New(bNode, cache, []peer.ID{sNode.ID()})
 	snapBytes, err := ns.Get(snapID)
 	if err != nil {
 		t.Fatalf("fetch snapshot: %v", err)

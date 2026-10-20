@@ -144,3 +144,22 @@ func TestRefreshSeesOtherWriters(t *testing.T) {
 		t.Fatalf("Refresh did not pick up the new friend (err %v)", err)
 	}
 }
+
+func TestApplyAddrs(t *testing.T) {
+	b, _ := Load(filepath.Join(t.TempDir(), "friends.json"))
+	c := newCard(t, "dave", "/ip4/192.0.2.1/tcp/4001")
+	b.Add(c, "", 1)
+	key := hex.EncodeToString(c.PubKey)
+	if ok, err := b.ApplyAddrs(key, []string{"/ip4/192.0.2.2/tcp/4001"}, 10, []byte("sig")); !ok || err != nil {
+		t.Fatalf("first signed record not applied: %v", err)
+	}
+	if ok, _ := b.ApplyAddrs(key, []string{"/ip4/192.0.2.3/tcp/4001"}, 5, []byte("old")); ok {
+		t.Fatal("older record replaced a newer one")
+	}
+	if f, _ := b.Get(key); f.Addrs[0] != "/ip4/192.0.2.2/tcp/4001" || f.AddrSeq != 10 {
+		t.Fatalf("friend = %+v", f)
+	}
+	if ok, _ := b.ApplyAddrs(strings.Repeat("ab", 32), []string{"/ip4/192.0.2.9/tcp/1"}, 99, nil); ok {
+		t.Fatal("record applied for a non-friend")
+	}
+}

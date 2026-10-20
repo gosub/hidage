@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -15,26 +13,16 @@ import (
 )
 
 func newNetListCmd() *cobra.Command {
-	var bootstrap []string
-	var ownerHex string
+	var from []string
 	cmd := &cobra.Command{
 		Use:   "net-list",
-		Short: "List the backups an owner has published to the network",
+		Short: "List the backups you have published to your friends",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kr, err := unlock()
 			if err != nil {
 				return err
 			}
-			owner := kr.Identity().Public
-			if ownerHex != "" {
-				raw, err := hex.DecodeString(ownerHex)
-				if err != nil || len(raw) != ed25519.PublicKeySize {
-					return fmt.Errorf("invalid --owner public key")
-				}
-				owner = ed25519.PublicKey(raw)
-			}
-
 			node, err := p2p.New(kr.Identity(), nil, nil)
 			if err != nil {
 				return err
@@ -42,25 +30,15 @@ func newNetListCmd() *cobra.Command {
 			defer node.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
-			if err := node.EnableDHT(ctx); err != nil {
+			sources, err := recoverySources(ctx, node, from)
+			if err != nil {
 				return err
 			}
-			if err := joinNetwork(ctx, node, bootstrap); err != nil {
-				return err
-			}
-
-			var mid string
-			deadline := time.Now().Add(30 * time.Second)
-			for time.Now().Before(deadline) {
-				if mid, _ = node.GetHead(ctx, owner); mid != "" {
-					break
-				}
-				time.Sleep(time.Second)
-			}
+			mid := node.ResolveHead(ctx, sources)
 			if mid == "" {
-				return fmt.Errorf("no backups found for that owner")
+				return fmt.Errorf("none of the %d friend(s) reached holds a backup of yours", len(sources))
 			}
-			data, err := node.GetObject(ctx, mid)
+			data, err := node.GetObject(ctx, mid, sources)
 			if err != nil {
 				return fmt.Errorf("fetch account manifest: %w", err)
 			}
@@ -83,7 +61,6 @@ func newNetListCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s) (default: your friends)")
-	cmd.Flags().StringVar(&ownerHex, "owner", "", "owner public key hex (default: your own)")
+	cmd.Flags().StringArrayVar(&from, "from", nil, "also ask this friend (contact card or /p2p multiaddr), e.g. on a new machine")
 	return cmd
 }

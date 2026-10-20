@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
+
 	"hidage/internal/dag"
 	"hidage/internal/identity"
 	"hidage/internal/keyring"
@@ -53,7 +55,7 @@ func TestRedundantRecoverySurvivesPeerLoss(t *testing.T) {
 	relBytes, _ := json.Marshal(rel)
 	relID := store.ID(relBytes)
 
-	// Three storage peers in one DHT.
+	// Three friends' storage nodes.
 	storNodes := make([]*p2p.Node, 3)
 	for i := range storNodes {
 		sink, _ := store.NewKeyedStore(t.TempDir())
@@ -62,8 +64,9 @@ func TestRedundantRecoverySurvivesPeerLoss(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		n.EnableDHT(ctx)
 		n.EnablePush(sink, nil, nil)
+		heads, _ := store.NewKeyedStore(t.TempDir())
+		n.EnableHeadStore(heads.Put, heads.Get)
 		storNodes[i] = n
 	}
 	defer func() {
@@ -71,17 +74,14 @@ func TestRedundantRecoverySurvivesPeerLoss(t *testing.T) {
 			n.Close()
 		}
 	}()
-	for i := 1; i < 3; i++ {
-		if err := storNodes[i].Bootstrap(ctx, storNodes[0].Addrs()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	storNodes[0].Bootstrap(ctx, nil)
 
 	// Owner spreads shards round-robin across the three peers, plus the Release.
 	owner, _ := p2p.New(idA, nil, []string{"/ip4/127.0.0.1/tcp/0"})
-	owner.EnableDHT(ctx)
-	owner.Bootstrap(ctx, storNodes[0].Addrs())
+	for _, n := range storNodes {
+		if _, err := owner.Connect(ctx, n.Addrs()[0]); err != nil {
+			t.Fatal(err)
+		}
+	}
 	assign := make([]map[string][]byte, 3)
 	for i := range assign {
 		assign[i] = map[string][]byte{relID: relBytes}
@@ -96,34 +96,33 @@ func TestRedundantRecoverySurvivesPeerLoss(t *testing.T) {
 			t.Fatalf("push to peer %d: %v", i, err)
 		}
 	}
-	if _, err := owner.PutHead(ctx, idA, relID); err != nil {
-		t.Fatal(err)
+	head, _ := p2p.SignHead(idA, relID)
+	for _, n := range storNodes {
+		if err := owner.PushHead(ctx, n.ID(), head); err != nil {
+			t.Fatal(err)
+		}
 	}
 	owner.Close()
 
 	// Lose a peer entirely.
 	storNodes[1].Close()
 
-	// Recover from the survivors (bootstrap off both remaining peers).
+	// Recover from the survivors.
 	rec, _ := p2p.New(idA, nil, []string{"/ip4/127.0.0.1/tcp/0"})
 	defer rec.Close()
-	rec.EnableDHT(ctx)
-	rec.Bootstrap(ctx, append(storNodes[0].Addrs(), storNodes[2].Addrs()...))
-
-	var got string
-	deadline := time.Now().Add(40 * time.Second)
-	for time.Now().Before(deadline) {
-		if got, _ = rec.GetHead(ctx, idA.Public); got == relID {
-			break
+	survivors := []peer.ID{storNodes[0].ID(), storNodes[2].ID()}
+	for _, i := range []int{0, 2} {
+		if _, err := rec.Connect(ctx, storNodes[i].Addrs()[0]); err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(300 * time.Millisecond)
 	}
+	got := rec.ResolveHead(ctx, append([]peer.ID{storNodes[1].ID()}, survivors...))
 	if got != relID {
 		t.Fatalf("recovered head %q, want %q", got, relID)
 	}
 
 	cache, _ := store.NewKeyedStore(t.TempDir())
-	ns := netstore.New(rec, cache)
+	ns := netstore.New(rec, cache, survivors)
 	fetchedRel, err := ns.Get(relID)
 	if err != nil {
 		t.Fatalf("fetch release: %v", err)

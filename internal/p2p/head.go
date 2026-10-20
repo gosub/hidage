@@ -20,17 +20,18 @@ import (
 	"hidage/internal/identity"
 )
 
-// Head pointers let a peer find an owner's latest snapshot with no local state,
-// IPNS-style: the DHT key is derived from the owner's public key and the value is
-// a signed record naming the current snapshot. The headValidator (registered for
-// the "hidage" namespace) verifies the signature on Put and Get and selects the
-// newest record, so the DHT only accepts records an owner actually signed.
+// Head pointers let an owner find its latest account manifest with no local
+// state: a small record naming the manifest's content address, signed by the
+// owner. The owner hands the record to every friend holding its data
+// (HeadPushProtocol); a recovering owner asks its friends for it back
+// (HeadGetProtocol) and keeps the newest valid one. Friends can withhold a record
+// or serve an older one, but cannot forge or alter it.
 
 const headNamespace = "hidage"
 
 type headRecord struct {
-	SnapshotID string `json:"snapshotID"`
-	CreatedAt  int64  `json:"createdAt"` // unix nanoseconds
+	SnapshotID string `json:"snapshotID"` // the account manifest's content address
+	CreatedAt  int64  `json:"createdAt"`  // unix nanoseconds; newest wins
 	Sig        []byte `json:"sig"`
 }
 
@@ -38,43 +39,19 @@ func headPayload(snapshotID string, createdAt int64) []byte {
 	return []byte(snapshotID + "\n" + strconv.FormatInt(createdAt, 10))
 }
 
-// HeadKey is the DHT key for an owner's head pointer.
+// HeadKey names an owner's head record on the wire.
 func HeadKey(pub ed25519.PublicKey) string {
 	return "/" + headNamespace + "/" + hex.EncodeToString(pub)
 }
 
-// PutHead publishes a signed head pointer naming snapshotID as the owner's
-// latest. It returns the exact record bytes it put, so the caller can also hand
-// them to storage peers (which re-publish them, so discovery survives the owner
-// going offline — see PushHead / RepublishHead).
-func (n *Node) PutHead(ctx context.Context, id identity.Identity, snapshotID string) ([]byte, error) {
-	rec := headRecord{SnapshotID: snapshotID, CreatedAt: time.Now().UnixNano()}
-	rec.Sig = ed25519.Sign(id.Private, headPayload(snapshotID, rec.CreatedAt))
-	val, err := json.Marshal(rec)
-	if err != nil {
-		return nil, err
-	}
-	return val, n.dht.PutValue(ctx, HeadKey(id.Public), val)
+// SignHead returns a signed head record naming manifestID as the owner's latest.
+func SignHead(id identity.Identity, manifestID string) ([]byte, error) {
+	rec := headRecord{SnapshotID: manifestID, CreatedAt: time.Now().UnixNano()}
+	rec.Sig = ed25519.Sign(id.Private, headPayload(manifestID, rec.CreatedAt))
+	return json.Marshal(rec)
 }
-
-// GetHead resolves an owner's latest snapshot id from the DHT.
-func (n *Node) GetHead(ctx context.Context, pub ed25519.PublicKey) (string, error) {
-	val, err := n.dht.GetValue(ctx, HeadKey(pub))
-	if err != nil {
-		return "", err
-	}
-	var rec headRecord
-	if err := json.Unmarshal(val, &rec); err != nil {
-		return "", err
-	}
-	return rec.SnapshotID, nil
-}
-
-// headValidator implements record.Validator for head pointers.
-type headValidator struct{}
 
 func pubFromKey(key string) (ed25519.PublicKey, error) {
-	// key is "/hidage/<hexpubkey>"
 	prefix := "/" + headNamespace + "/"
 	if !strings.HasPrefix(key, prefix) {
 		return nil, fmt.Errorf("not a head key: %q", key)
@@ -89,51 +66,33 @@ func pubFromKey(key string) (ed25519.PublicKey, error) {
 	return ed25519.PublicKey(raw), nil
 }
 
-func (headValidator) Validate(key string, value []byte) error {
-	pub, err := pubFromKey(key)
-	if err != nil {
-		return err
-	}
+// verifyHead parses a head record and checks the owner's signature.
+func verifyHead(owner ed25519.PublicKey, val []byte) (headRecord, error) {
 	var rec headRecord
-	if err := json.Unmarshal(value, &rec); err != nil {
-		return err
+	if err := json.Unmarshal(val, &rec); err != nil {
+		return rec, err
 	}
-	if !ed25519.Verify(pub, headPayload(rec.SnapshotID, rec.CreatedAt), rec.Sig) {
-		return errors.New("head record signature invalid")
+	if !ed25519.Verify(owner, headPayload(rec.SnapshotID, rec.CreatedAt), rec.Sig) {
+		return rec, errors.New("head record signature invalid")
 	}
-	return nil
+	return rec, nil
 }
 
-func (headValidator) Select(key string, values [][]byte) (int, error) {
-	best, bestTime := -1, int64(-1)
-	for i, v := range values {
-		var rec headRecord
-		if err := json.Unmarshal(v, &rec); err != nil {
-			continue
-		}
-		if rec.CreatedAt > bestTime {
-			best, bestTime = i, rec.CreatedAt
-		}
-	}
-	if best < 0 {
-		return 0, errors.New("no valid head records")
-	}
-	return best, nil
-}
-
-// HeadPushProtocol lets an owner hand a storage peer its signed head record, so
-// the peer can keep re-publishing it to the DHT after the owner goes offline —
-// making disaster recovery survive loss of the original machine, not just DHT
-// record expiry while the owner is alive. The record is owner-signed and
-// self-validating, so a peer re-serving it can neither forge nor alter it.
+// HeadPushProtocol lets an owner hand a friend its signed head record, so the
+// friend can return it during recovery, after the owner's machine is gone.
 const HeadPushProtocol = "/hidage/head/1.0.0"
+
+// HeadGetProtocol asks a friend for the head record it holds for the requester.
+// Request: nothing (the requester is the owner, authenticated by the
+// connection). Response: a 4-byte big-endian length (0 = none) and the record.
+const HeadGetProtocol = "/hidage/head-get/1.0.0"
 
 const maxHeadRecord = 4096 // a head record is a tiny signed JSON blob
 
-// EnableHeadStore makes the node accept pushed head records. Each is validated
-// (owner signature) before store is called with the owner's hex public key and
-// the raw record bytes. A nil store disables acceptance.
-func (n *Node) EnableHeadStore(store func(ownerHex string, val []byte) error) {
+// EnableHeadStore makes the node keep owners' head records: pushed records are
+// verified and passed to put (with the owner's hex public key); an owner asking
+// for its own record gets what get returns.
+func (n *Node) EnableHeadStore(put func(ownerHex string, val []byte) error, get func(ownerHex string) ([]byte, error)) {
 	n.host.SetStreamHandler(HeadPushProtocol, func(s network.Stream) {
 		defer s.Close()
 		br := bufio.NewReader(s)
@@ -141,7 +100,6 @@ func (n *Node) EnableHeadStore(store func(ownerHex string, val []byte) error) {
 		if err != nil {
 			return
 		}
-		key = key[:len(key)-1]
 		var length uint32
 		if err := binary.Read(br, binary.BigEndian, &length); err != nil || length > maxHeadRecord {
 			return
@@ -150,29 +108,41 @@ func (n *Node) EnableHeadStore(store func(ownerHex string, val []byte) error) {
 		if _, err := io.ReadFull(br, val); err != nil {
 			return
 		}
-		pub, err := pubFromKey(key)
+		pub, err := pubFromKey(key[:len(key)-1])
 		if err != nil {
 			return
 		}
-		if err := (headValidator{}).Validate(key, val); err != nil {
-			return // reject anything the owner didn't sign
+		// Only the owner may set its head, and only with a record it signed.
+		if sender, err := PeerPubKeyHex(s.Conn().RemotePeer()); err != nil || sender != hex.EncodeToString(pub) {
+			return
 		}
-		if store != nil {
-			_ = store(hex.EncodeToString(pub), val)
+		if _, err := verifyHead(pub, val); err != nil {
+			return
 		}
-		s.Write([]byte{1})
+		if put != nil && put(hex.EncodeToString(pub), val) == nil {
+			s.Write([]byte{1})
+		}
+	})
+	n.host.SetStreamHandler(HeadGetProtocol, func(s network.Stream) {
+		defer s.Close()
+		owner, err := PeerPubKeyHex(s.Conn().RemotePeer())
+		var val []byte
+		if err == nil && get != nil {
+			val, _ = get(owner)
+		}
+		binary.Write(s, binary.BigEndian, uint32(len(val)))
+		s.Write(val)
 	})
 }
 
-// PushHead sends a signed head record for owner to peer p, which may persist and
-// re-publish it. key must be HeadKey(owner) and val the bytes PutHead returned.
-func (n *Node) PushHead(ctx context.Context, p peer.ID, key string, val []byte) error {
+// PushHead sends this node's signed head record (from SignHead) to peer p.
+func (n *Node) PushHead(ctx context.Context, p peer.ID, val []byte) error {
 	s, err := n.host.NewStream(ctx, p, HeadPushProtocol)
 	if err != nil {
 		return fmt.Errorf("open head stream: %w", err)
 	}
 	defer s.Close()
-	if _, err := s.Write([]byte(key + "\n")); err != nil {
+	if _, err := s.Write([]byte(HeadKey(n.id.Public) + "\n")); err != nil {
 		return err
 	}
 	if err := binary.Write(s, binary.BigEndian, uint32(len(val))); err != nil {
@@ -185,17 +155,55 @@ func (n *Node) PushHead(ctx context.Context, p peer.ID, key string, val []byte) 
 		cw.CloseWrite()
 	}
 	ack := make([]byte, 1)
-	_, err = io.ReadFull(s, ack)
-	return err
+	if _, err := io.ReadFull(s, ack); err != nil {
+		return fmt.Errorf("peer did not store the head record: %w", err)
+	}
+	return nil
 }
 
-// RepublishHead re-puts a stored head record (for the owner with the given hex
-// public key) to the DHT. The namespaced validator re-checks the signature, so a
-// peer can only republish records an owner actually signed.
-func (n *Node) RepublishHead(ctx context.Context, ownerHex string, val []byte) error {
-	raw, err := hex.DecodeString(ownerHex)
-	if err != nil || len(raw) != ed25519.PublicKeySize {
-		return fmt.Errorf("bad owner key %q", ownerHex)
+// FetchHead asks peer p for the head record it holds for this node, returning
+// the manifest id it names and its timestamp. It returns "" if p holds none.
+func (n *Node) FetchHead(ctx context.Context, p peer.ID) (string, int64, error) {
+	s, err := n.host.NewStream(ctx, p, HeadGetProtocol)
+	if err != nil {
+		return "", 0, fmt.Errorf("open head-get stream: %w", err)
 	}
-	return n.dht.PutValue(ctx, HeadKey(ed25519.PublicKey(raw)), val)
+	defer s.Close()
+	if cw, ok := s.(interface{ CloseWrite() error }); ok {
+		cw.CloseWrite()
+	}
+	var length uint32
+	if err := binary.Read(s, binary.BigEndian, &length); err != nil {
+		return "", 0, err
+	}
+	if length == 0 {
+		return "", 0, nil
+	}
+	if length > maxHeadRecord {
+		return "", 0, errors.New("head record too large")
+	}
+	val := make([]byte, length)
+	if _, err := io.ReadFull(s, val); err != nil {
+		return "", 0, err
+	}
+	rec, err := verifyHead(n.id.Public, val)
+	if err != nil {
+		return "", 0, err
+	}
+	return rec.SnapshotID, rec.CreatedAt, nil
+}
+
+// ResolveHead asks every peer for this node's head record and returns the
+// manifest id named by the newest valid one ("" if no peer holds one).
+func (n *Node) ResolveHead(ctx context.Context, peers []peer.ID) string {
+	best, bestAt := "", int64(-1)
+	for _, p := range peers {
+		c, cancel := context.WithTimeout(ctx, 10*time.Second)
+		id, at, err := n.FetchHead(c, p)
+		cancel()
+		if err == nil && id != "" && at > bestAt {
+			best, bestAt = id, at
+		}
+	}
+	return best
 }

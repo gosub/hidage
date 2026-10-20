@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -33,21 +32,20 @@ func publishedStore() (*store.KeyedStore, error) {
 	return store.NewKeyedStore(filepath.Join(config.DataStoreDir(), "published"))
 }
 
-// headsStore holds signed head records this node re-publishes on owners' behalf,
-// keyed by owner public-key hex, so discovery survives an owner going offline.
+// headsStore holds the signed head records friends handed this node, keyed by
+// owner public-key hex, so an owner can get its head back after losing its machine.
 func headsStore() (*store.KeyedStore, error) {
 	return store.NewKeyedStore(filepath.Join(config.DataStoreDir(), "heads"))
 }
 
 func newServeCmd() *cobra.Command {
 	var listen []string
-	var bootstrap []string
 	var ratio float64
 	var freeMiB int64
 	var leaseHours int
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run a node: serve objects, accept pushes from friends, join the DHT",
+		Short: "Run a node: host and serve friends' data, relay for them, keep in touch",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kr, err := unlock()
@@ -99,9 +97,6 @@ func newServeCmd() *cobra.Command {
 			defer node.Close()
 
 			ctx := context.Background()
-			if err := node.EnableDHT(ctx); err != nil {
-				return err
-			}
 			ledger, err := accounting.Load(paths.AccountingPath)
 			if err != nil {
 				return err
@@ -110,9 +105,8 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			node.EnableHeadStore(func(ownerHex string, val []byte) error {
-				return heads.Put(ownerHex, val) // owner-signed; re-published so recovery survives owner loss
-			})
+			node.EnableHeadStore(heads.Put, heads.Get) // owner-signed; returned to the owner on recovery
+			node.EnableAddrService(func(subject string) *p2p.AddrRecord { return storedAddrRecord(book, subject) })
 			free := freeMiB << 20
 			node.EnablePush(pub,
 				func(senderPub []byte, cumulative int64) bool {
@@ -128,11 +122,7 @@ func newServeCmd() *cobra.Command {
 					ledger.AddStoredForThem(pubHex, b)
 					book.Update(pubHex, func(f *friends.Friend) error { f.LastSeen = time.Now().UTC(); return nil })
 				})
-			if err := joinNetwork(ctx, node, bootstrap); err != nil {
-				return err
-			}
-			go reprovideLoop(ctx, node, pub)
-			go republishHeadsLoop(ctx, node, heads)
+			go keepInTouchLoop(ctx, node, book)
 			go gcLoop(ctx, pub, time.Duration(leaseHours)*time.Hour)
 
 			if err := writeNodeState(node.ListenAddrs()); err != nil {
@@ -151,7 +141,6 @@ func newServeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringArrayVar(&listen, "listen", nil, "listen multiaddr(s) (default: `listen` in config.toml)")
-	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s) (default: your friends)")
 	cmd.Flags().Float64Var(&ratio, "ratio", accounting.DefaultRatio, "max bytes stored per peer per byte they store for us")
 	cmd.Flags().Int64Var(&freeMiB, "free", accounting.DefaultFreeQuota>>20, "free quota per peer, in MiB (no reciprocation required)")
 	cmd.Flags().IntVar(&leaseHours, "lease", 0, "hosted-shard lease in hours; data not renewed within this is reclaimed (default: hosting.lease_days)")
@@ -174,6 +163,20 @@ func nodeStateLoop(ctx context.Context, node *p2p.Node) {
 				last = cur
 				_ = writeNodeState(addrs)
 			}
+		}
+	}
+}
+
+// keepInTouchLoop periodically reconnects to friends (so they can relay for us
+// and we for them) and refreshes their signed address records.
+func keepInTouchLoop(ctx context.Context, node *p2p.Node, book *friends.Book) {
+	for {
+		book.Refresh()
+		reachFriends(ctx, node, book, true)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Minute):
 		}
 	}
 }
@@ -204,7 +207,7 @@ func gcLoop(ctx context.Context, blobs *store.KeyedStore, lease time.Duration) {
 }
 
 func newPublishCmd() *cobra.Command {
-	var bootstrap, peers []string
+	var peers []string
 	var redundancy float64
 	var useFriends bool
 	var minPeers int
@@ -274,36 +277,6 @@ func newPublishCmd() *cobra.Command {
 			defer node.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
-			if err := node.EnableDHT(ctx); err != nil {
-				return err
-			}
-			if err := joinNetwork(ctx, node, bootstrap); err != nil {
-				return err
-			}
-			node.WaitForPeers(ctx, 1, 15*time.Second) // settle the DHT before record ops
-
-			// Merge this repo's release into the owner's account manifest, so the
-			// single head pointer indexes every backed-up folder, not just this one.
-			manifest := fetchManifest(ctx, node, kr.Identity().Public)
-			manifest.Upsert(account.Entry{
-				RepoID:    r.RepoID(),
-				Name:      snap.Source,
-				ReleaseID: relID,
-				UpdatedAt: time.Now().UTC(),
-			})
-			manifestBytes, err := manifest.Bytes()
-			if err != nil {
-				return err
-			}
-			manifestID := store.ID(manifestBytes)
-			paths, err := config.Ensure()
-			if err != nil {
-				return err
-			}
-			ledger, err := accounting.Load(paths.AccountingPath)
-			if err != nil {
-				return err
-			}
 
 			// Collect candidate peers: explicit --peer multiaddrs, plus (with
 			// --friends) every friend reachable at a known address.
@@ -325,16 +298,10 @@ func newPublishCmd() *cobra.Command {
 				}
 				add(pid)
 			}
+			var reached []friends.Friend
 			if useFriends {
-				for _, f := range book.List() {
-					pid, err := f.PeerID()
-					if err != nil {
-						continue
-					}
-					if err := node.ConnectAddrs(ctx, pid, f.Addrs); err != nil {
-						fmt.Printf("  %s: unreachable (%v)\n", f.Nickname, err)
-						continue
-					}
+				reached = reachFriends(ctx, node, book, false)
+				for _, pid := range peerIDs(reached) {
 					add(pid)
 				}
 			}
@@ -344,6 +311,30 @@ func newPublishCmd() *cobra.Command {
 			if len(accepted) < minPeers {
 				return fmt.Errorf("only %d acceptable peer(s) reachable, need at least --min-peers=%d", len(accepted), minPeers)
 			}
+
+			// Merge this repo's release into the owner's account manifest, so the
+			// single head pointer indexes every backed-up folder, not just this one.
+			manifest := fetchManifest(ctx, node, peerIDs(reached))
+			manifest.Upsert(account.Entry{
+				RepoID:    r.RepoID(),
+				Name:      snap.Source,
+				ReleaseID: relID,
+				UpdatedAt: time.Now().UTC(),
+			})
+			manifestBytes, err := manifest.Bytes()
+			if err != nil {
+				return err
+			}
+			manifestID := store.ID(manifestBytes)
+			paths, err := config.Ensure()
+			if err != nil {
+				return err
+			}
+			ledger, err := accounting.Load(paths.AccountingPath)
+			if err != nil {
+				return err
+			}
+
 			// Erasure coding only helps if shards land on enough distinct peers.
 			tolerate := int(float64(len(accepted)) * (1 - 1/redundancy))
 			if tolerate == 0 {
@@ -393,15 +384,20 @@ func newPublishCmd() *cobra.Command {
 			if err := writeDistribution(r.HidageFile("distribution.json"), dist); err != nil {
 				return err
 			}
-			headVal, err := node.PutHead(ctx, kr.Identity(), manifestID)
+			headVal, err := p2p.SignHead(kr.Identity(), manifestID)
 			if err != nil {
-				return fmt.Errorf("publish head: %w", err)
+				return err
 			}
-			// Hand the signed head to peers so they keep it discoverable after we
-			// go offline (they re-publish it; it's owner-signed, so safe to serve).
-			headKey := p2p.HeadKey(kr.Identity().Public)
+			// Hand the signed head to every friend reached (not just this repo's
+			// holders: the manifest indexes all repos), so it can be asked back
+			// during recovery.
+			for _, pid := range peerIDs(reached) {
+				_ = node.PushHead(ctx, pid, headVal)
+			}
 			for _, p := range holders {
-				_ = node.PushHead(ctx, p.id, headKey, headVal)
+				if !seenFriend(reached, p.pubHex) {
+					_ = node.PushHead(ctx, p.id, headVal)
+				}
 			}
 			fmt.Printf("Published %q (%s) as %d shards across %d peers (%.1fx redundancy).\n",
 				snap.Source, r.RepoID()[:12], len(shardBlobs), len(holders), redundancy)
@@ -409,7 +405,6 @@ func newPublishCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s) (default: your friends)")
 	cmd.Flags().StringArrayVar(&peers, "peer", nil, "push to this peer multiaddr instead of your friends")
 	cmd.Flags().BoolVar(&useFriends, "friends", false, "push to every reachable friend (the default when no --peer is given)")
 	cmd.Flags().IntVar(&minPeers, "min-peers", 0, "fail unless at least this many acceptable peers are reachable (default: backup.min_friends)")
@@ -470,14 +465,25 @@ func spreadShards(shardBlobs, common map[string][]byte, n int) []map[string][]by
 	return out
 }
 
-// fetchManifest resolves the owner's current account manifest from the network,
-// returning an empty one if none exists or it can't be verified.
-func fetchManifest(ctx context.Context, node *p2p.Node, owner ed25519.PublicKey) *account.Manifest {
-	mid, err := node.GetHead(ctx, owner)
-	if err != nil || mid == "" {
+// seenFriend reports whether pubHex is among the friends in list.
+func seenFriend(list []friends.Friend, pubHex string) bool {
+	for _, f := range list {
+		if f.PubKey == pubHex {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchManifest resolves this node's current account manifest from its friends
+// (newest signed head wins), returning an empty one if none exists or it can't
+// be verified.
+func fetchManifest(ctx context.Context, node *p2p.Node, peers []peer.ID) *account.Manifest {
+	mid := node.ResolveHead(ctx, peers)
+	if mid == "" {
 		return account.New()
 	}
-	data, err := node.GetObject(ctx, mid)
+	data, err := node.GetObject(ctx, mid, peers)
 	if err != nil || store.ID(data) != mid {
 		return account.New()
 	}
@@ -489,28 +495,18 @@ func fetchManifest(ctx context.Context, node *p2p.Node, owner ed25519.PublicKey)
 }
 
 func newNetRestoreCmd() *cobra.Command {
-	var bootstrap []string
-	var ownerHex string
+	var from []string
 	var repoSel string
 	var all bool
 	cmd := &cobra.Command{
 		Use:   "net-restore <out-dir>",
-		Short: "Recover backups from the network (head → account manifest → shards)",
+		Short: "Recover backups from your friends (head → account manifest → shards)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kr, err := unlock()
 			if err != nil {
 				return err
 			}
-			owner := kr.Identity().Public
-			if ownerHex != "" {
-				raw, err := hex.DecodeString(ownerHex)
-				if err != nil || len(raw) != ed25519.PublicKeySize {
-					return fmt.Errorf("invalid --owner public key")
-				}
-				owner = ed25519.PublicKey(raw)
-			}
-
 			node, err := p2p.New(kr.Identity(), nil, nil)
 			if err != nil {
 				return err
@@ -518,30 +514,20 @@ func newNetRestoreCmd() *cobra.Command {
 			defer node.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 			defer cancel()
-			if err := node.EnableDHT(ctx); err != nil {
+			sources, err := recoverySources(ctx, node, from)
+			if err != nil {
 				return err
 			}
-			if err := joinNetwork(ctx, node, bootstrap); err != nil {
-				return err
-			}
-
-			var mid string
-			deadline := time.Now().Add(60 * time.Second)
-			for time.Now().Before(deadline) {
-				if mid, _ = node.GetHead(ctx, owner); mid != "" {
-					break
-				}
-				time.Sleep(time.Second)
-			}
+			mid := node.ResolveHead(ctx, sources)
 			if mid == "" {
-				return fmt.Errorf("could not resolve a head pointer for that owner")
+				return fmt.Errorf("none of the %d friend(s) reached holds a backup of yours", len(sources))
 			}
 
 			cache, err := store.NewKeyedStore(filepath.Join(config.DataStoreDir(), "cache"))
 			if err != nil {
 				return err
 			}
-			ns := netstore.New(node, cache)
+			ns := netstore.New(node, cache, sources)
 
 			manBytes, err := ns.Get(mid)
 			if err != nil {
@@ -555,7 +541,7 @@ func newNetRestoreCmd() *cobra.Command {
 				return err
 			}
 			if len(manifest.Entries) == 0 {
-				return fmt.Errorf("owner has no published backups")
+				return fmt.Errorf("you have no published backups")
 			}
 
 			// Choose which backup(s) to restore.
@@ -588,11 +574,31 @@ func newNetRestoreCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s) (default: your friends)")
-	cmd.Flags().StringVar(&ownerHex, "owner", "", "owner public key hex (default: your own)")
+	cmd.Flags().StringArrayVar(&from, "from", nil, "also recover from this friend (contact card or /p2p multiaddr), e.g. on a new machine")
 	cmd.Flags().StringVar(&repoSel, "repo", "", "which backup to restore (name or repo-id prefix)")
 	cmd.Flags().BoolVar(&all, "all", false, "restore every backup in the account")
 	return cmd
+}
+
+// recoverySources reaches every friend in the friend list plus the extra peers
+// given with --from, and returns them all. It fails if none can be reached.
+func recoverySources(ctx context.Context, node *p2p.Node, from []string) ([]peer.ID, error) {
+	extra, err := connectExtra(ctx, node, from)
+	if err != nil {
+		return nil, err
+	}
+	book, err := loadFriends()
+	if err != nil {
+		return nil, err
+	}
+	sources := append(peerIDs(reachFriends(ctx, node, book, true)), extra...)
+	if len(sources) == 0 {
+		if len(book.List()) == 0 {
+			return nil, fmt.Errorf("no friends to recover from; on a new machine pass --from <a friend's contact card or address>")
+		}
+		return nil, fmt.Errorf("none of your friends is reachable right now")
+	}
+	return sources, nil
 }
 
 // restoreRelease fetches a Release, reassembles its objects from K-of-M shards,
@@ -623,66 +629,6 @@ func restoreRelease(ns *netstore.Store, cache *store.KeyedStore, masterKey []byt
 		return err
 	}
 	return repo.RestoreWith(dag.NewLoader(cache, cache, masterKey), snap, outDir)
-}
-
-// reprovideLoop periodically announces every locally-held object to the DHT.
-// Provider records expire (libp2p's default validity is ~48h), so a one-shot
-// announce would make hosted shards undiscoverable — and unrecoverable — within
-// a day; refreshing well inside that window keeps them findable.
-func reprovideLoop(ctx context.Context, node *p2p.Node, blobs *store.KeyedStore) {
-	const interval = 12 * time.Hour // comfortably under the ~48h record validity
-	reprovide := func() {
-		ids, err := blobs.List()
-		if err != nil {
-			return
-		}
-		for _, id := range ids {
-			_ = node.Provide(ctx, id)
-		}
-	}
-	reprovide()
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			reprovide()
-		}
-	}
-}
-
-// republishHeadsLoop periodically re-puts every head record this node holds on
-// owners' behalf, so an owner's backups stay discoverable after the owner goes
-// offline (DHT head records otherwise expire once nobody refreshes them).
-func republishHeadsLoop(ctx context.Context, node *p2p.Node, heads *store.KeyedStore) {
-	const interval = 12 * time.Hour // under the DHT record validity
-	republish := func() {
-		node.WaitForPeers(ctx, 1, time.Minute) // can't put into an empty routing table
-		ownerHexes, err := heads.List()
-		if err != nil {
-			return
-		}
-		for _, ownerHex := range ownerHexes {
-			val, err := heads.Get(ownerHex)
-			if err != nil {
-				continue
-			}
-			_ = node.RepublishHead(ctx, ownerHex, val)
-		}
-	}
-	republish()
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			republish()
-		}
-	}
 }
 
 func waitForSignal() {

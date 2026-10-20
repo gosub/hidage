@@ -30,6 +30,11 @@ type Friend struct {
 	PubKey   string    `json:"-"` // hex Ed25519 public key (the map key on disk)
 	Nickname string    `json:"nickname"`
 	Addrs    []string  `json:"addrs,omitempty"` // multiaddrs without the /p2p/<id> suffix
+	// AddrSeq and AddrSig are set when Addrs came from the friend's own signed
+	// address record (so it can be passed on to other friends); a card leaves
+	// them empty.
+	AddrSeq int64  `json:"addrSeq,omitempty"`
+	AddrSig []byte `json:"addrSig,omitempty"`
 	Give     int64     `json:"give"`            // bytes this node will store for them
 	AddedAt  time.Time `json:"addedAt"`
 	LastSeen time.Time `json:"lastSeen,omitzero"`
@@ -152,7 +157,7 @@ func (b *Book) Add(c *Card, nickname string, give int64) (*Friend, bool, error) 
 	defer b.mu.Unlock()
 	if f, ok := b.friends[key]; ok {
 		if len(c.Addrs) > 0 {
-			f.Addrs = c.AddrStrings()
+			f.Addrs, f.AddrSeq, f.AddrSig = c.AddrStrings(), 0, nil
 		}
 		if nickname != "" && nickname != f.Nickname {
 			if err := b.checkNickLocked(nickname, key); err != nil {
@@ -171,6 +176,20 @@ func (b *Book) Add(c *Card, nickname string, give int64) (*Friend, bool, error) 
 	f := &Friend{PubKey: key, Nickname: nick, Addrs: c.AddrStrings(), Give: give, AddedAt: time.Now().UTC()}
 	b.friends[key] = f
 	return f, true, b.saveLocked()
+}
+
+// ApplyAddrs records a friend's signed address record if it is newer than the
+// one held (any signed record beats addresses from a card). The caller verifies
+// the signature. It reports whether the addresses changed.
+func (b *Book) ApplyAddrs(pubHex string, addrs []string, seq int64, sig []byte) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	f, ok := b.friends[pubHex]
+	if !ok || seq <= f.AddrSeq || len(addrs) == 0 {
+		return false, nil
+	}
+	f.Addrs, f.AddrSeq, f.AddrSig = addrs, seq, sig
+	return true, b.saveLocked()
 }
 
 // Remove drops a friend by public key.
