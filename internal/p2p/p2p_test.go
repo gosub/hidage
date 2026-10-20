@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
+
 	"hidage/internal/identity"
 	"hidage/internal/store"
 )
@@ -395,5 +397,35 @@ func TestAuditProofOfStorage(t *testing.T) {
 	}
 	if rec.OK {
 		t.Fatal("audit should fail when the proof does not match expected bytes")
+	}
+}
+
+func TestInboundFilter(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	friend, _ := newNodeID(t, nil)
+	stranger, _ := newNodeID(t, nil)
+	id, _ := identity.Generate()
+	gated, err := New(id, nil, "/ip4/127.0.0.1/tcp/0", WithInboundFilter(func(p peer.ID) bool {
+		return p == friend.ID()
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { gated.Close() })
+
+	if _, err := friend.Connect(ctx, gated.Addrs()[0]); err != nil {
+		t.Fatalf("friend should be admitted: %v", err)
+	}
+	if _, err := stranger.Connect(ctx, gated.Addrs()[0]); err == nil {
+		// The dial may complete before the gater's close propagates; a stream must fail.
+		if _, err := stranger.FetchObject(ctx, gated.ID(), "00"); err == nil {
+			t.Fatal("stranger should be refused")
+		}
+	}
+	// Outbound dials from the gated node are not filtered.
+	if _, err := gated.Connect(ctx, stranger.Addrs()[0]); err != nil {
+		t.Fatalf("outbound dial to a non-friend should work: %v", err)
 	}
 }

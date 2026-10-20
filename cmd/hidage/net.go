@@ -68,7 +68,15 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			node, err := p2p.New(kr.Identity(), pub, listen)
+			book, err := loadFriends()
+			if err != nil {
+				return err
+			}
+			// Friends only: refuse inbound connections from anyone else.
+			node, err := p2p.New(kr.Identity(), pub, listen, p2p.WithInboundFilter(func(id peer.ID) bool {
+				book.Refresh() // pick up `friend add/rm` made while serving
+				return book.IsFriendPeer(id)
+			}))
 			if err != nil {
 				return err
 			}
@@ -76,10 +84,6 @@ func newServeCmd() *cobra.Command {
 
 			ctx := context.Background()
 			if err := node.EnableDHT(ctx); err != nil {
-				return err
-			}
-			book, err := loadFriends()
-			if err != nil {
 				return err
 			}
 			ledger, err := accounting.Load(paths.AccountingPath)
@@ -96,7 +100,6 @@ func newServeCmd() *cobra.Command {
 			free := freeMiB << 20
 			node.EnablePush(pub,
 				func(senderPub []byte, cumulative int64) bool {
-					book.Refresh() // pick up `friend add/rm` made while serving
 					if !book.IsFriend(hex.EncodeToString(senderPub)) {
 						return false // friends only
 					}

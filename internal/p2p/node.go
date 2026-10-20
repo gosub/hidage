@@ -47,7 +47,11 @@ type Node struct {
 // New starts a libp2p host whose peer ID is derived from id (the node's Ed25519
 // identity), listening on listen (a multiaddr; empty = an ephemeral TCP port on
 // all interfaces). It serves objects from blobs.
-func New(id identity.Identity, blobs Blobs, listen string) (*Node, error) {
+func New(id identity.Identity, blobs Blobs, listen string, opts ...Option) (*Node, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	priv, err := crypto.UnmarshalEd25519PrivateKey(id.Private)
 	if err != nil {
 		return nil, fmt.Errorf("convert identity key: %w", err)
@@ -55,7 +59,11 @@ func New(id identity.Identity, blobs Blobs, listen string) (*Node, error) {
 	if listen == "" {
 		listen = "/ip4/0.0.0.0/tcp/0"
 	}
-	h, err := libp2p.New(libp2p.Identity(priv), libp2p.ListenAddrStrings(listen))
+	lopts := []libp2p.Option{libp2p.Identity(priv), libp2p.ListenAddrStrings(listen)}
+	if o.allowInbound != nil {
+		lopts = append(lopts, libp2p.ConnectionGater(inboundGater{allow: o.allowInbound}))
+	}
+	h, err := libp2p.New(lopts...)
 	if err != nil {
 		return nil, fmt.Errorf("start libp2p host: %w", err)
 	}
