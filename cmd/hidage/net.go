@@ -317,6 +317,7 @@ func newPublishCmd() *cobra.Command {
 			common := map[string][]byte{relID: relBytes, manifestID: manifestBytes}
 			assignments := spreadShards(shardBlobs, common, len(accepted))
 			dist := distribution{ReleaseID: relID, SnapshotID: snap.ID, Redundancy: redundancy, PublishedAt: time.Now().UTC(), Peers: map[string][]string{}}
+			var holders []peerID
 			for i, p := range accepted {
 				push := assignments[i]
 				var bytes int64
@@ -332,11 +333,22 @@ func newPublishCmd() *cobra.Command {
 					fmt.Printf("  %s: %v\n", p.id, err)
 					continue
 				}
-				if stored == len(push) && p.pubHex != "" {
-					ledger.AddTheyStoreForUs(p.pubHex, bytes)
-					dist.Peers[p.pubHex] = shardIDs // remember what to audit them for
+				if stored < len(push) {
+					fmt.Printf("  %s: stored only %d of %d objects (out of space?)\n", p.id, stored, len(push))
+					continue
 				}
+				ledger.AddTheyStoreForUs(p.pubHex, bytes)
+				dist.Peers[p.pubHex] = shardIDs // remember what to audit them for
+				holders = append(holders, p)
 				fmt.Printf("  %s: stored %d shards (%d bytes)\n", p.id, stored, bytes)
+			}
+			// Shards assigned to a peer that didn't store them are missing; the
+			// release is only rebuildable if no more peers failed than it tolerates.
+			if failed := len(accepted) - len(holders); failed > tolerate || len(holders) == 0 {
+				return fmt.Errorf("only %d of %d peers stored their shards, too few to rebuild the backup; "+
+					"the previous publish (if any) is still the one on record", len(holders), len(accepted))
+			} else if failed > 0 {
+				fmt.Printf("WARNING: %d peer(s) did not store their shards; the backup is rebuildable but has less fault tolerance than planned.\n", failed)
 			}
 			if err := writeDistribution(r.HidageFile("distribution.json"), dist); err != nil {
 				return err
@@ -348,11 +360,11 @@ func newPublishCmd() *cobra.Command {
 			// Hand the signed head to peers so they keep it discoverable after we
 			// go offline (they re-publish it; it's owner-signed, so safe to serve).
 			headKey := p2p.HeadKey(kr.Identity().Public)
-			for _, p := range accepted {
+			for _, p := range holders {
 				_ = node.PushHead(ctx, p.id, headKey, headVal)
 			}
 			fmt.Printf("Published %q (%s) as %d shards across %d peers (%.1fx redundancy).\n",
-				snap.Source, r.RepoID()[:12], len(shardBlobs), len(accepted), redundancy)
+				snap.Source, r.RepoID()[:12], len(shardBlobs), len(holders), redundancy)
 			fmt.Printf("Account now indexes %d backup(s).\n", len(manifest.Entries))
 			return nil
 		},
