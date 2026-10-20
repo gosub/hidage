@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"hidage/internal/crypto"
+	"hidage/internal/dag"
 	"hidage/internal/identity"
 )
 
@@ -236,5 +237,59 @@ func TestForgetAndPrune(t *testing.T) {
 	out := t.TempDir()
 	if err := r.Restore(snapB, out); err != nil {
 		t.Fatalf("snapB should still restore after prune: %v", err)
+	}
+}
+
+func TestAdoptRebuildsRepository(t *testing.T) {
+	r, priv, _ := newRepo(t)
+	snap, _, err := r.Snapshot(priv, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs, err := r.PublishSet(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func(id string) ([]byte, error) {
+		if d, ok := objs[id]; ok {
+			return d, nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	// On a "new machine": restore the files, then adopt the restored folder.
+	out := t.TempDir()
+	l := dag.NewLoader(getterFunc(get), getterFunc(get), r.masterKey)
+	if err := RestoreWith(l, snap, out); err != nil {
+		t.Fatal(err)
+	}
+	name, err := RootName(l, snap)
+	if err != nil || name != "data" {
+		t.Fatalf("RootName = %q, %v", name, err)
+	}
+	adopted, err := Adopt(filepath.Join(out, name), r.masterKey, t.TempDir(), r.RepoID(), objs[snap.ID], get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted.RepoID() != r.RepoID() {
+		t.Fatalf("repo id %s, want %s", adopted.RepoID(), r.RepoID())
+	}
+	latest, err := adopted.Latest()
+	if err != nil || latest == nil || latest.ID != snap.ID {
+		t.Fatalf("adopted latest = %+v, %v", latest, err)
+	}
+	// The adopted repo yields the identical publish set (so re-publishing renews).
+	again, err := adopted.PublishSet(latest)
+	if err != nil || len(again) != len(objs) {
+		t.Fatalf("publish set: %d objects, %v; want %d", len(again), err, len(objs))
+	}
+	for id, d := range objs {
+		if string(again[id]) != string(d) {
+			t.Fatalf("object %s differs after adopt", id)
+		}
+	}
+	// A new snapshot of the unchanged folder stores nothing new.
+	if _, stats, err := adopted.Snapshot(priv, false); err != nil || stats.NewObjects != 0 {
+		t.Fatalf("snapshot after adopt stored %d new objects (%v), want 0", stats.NewObjects, err)
 	}
 }
