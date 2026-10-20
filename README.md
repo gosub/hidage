@@ -8,12 +8,12 @@ reputation ledger tracks which hosts are reliable.
 
 > **Status: networked + redundant.** The encrypted **versioned storage core**
 > (content-addressed repository with incremental snapshots, history, diff, prune)
-> distributes over a **libp2p P2P network**: nodes discover objects via a Kademlia DHT;
+> distributes over **libp2p** between friends (direct, through a friend's relay, or hole-punched);
 > a snapshot is **erasure-coded** and its shards spread across your friends' nodes (any K of M
 > reconstruct, so it survives losing a minority); peers are kept honest by **proof-of-
 > storage audits** feeding a **reputation** score, and a **space-accounting** ledger
 > enforces the contribute-more-than-you-consume model. A backup is recoverable on a fresh
-> machine from just the **recovery phrase + one bootstrap peer**.
+> machine from just the **recovery phrase + one friend's contact card**.
 
 ## How it works
 
@@ -94,7 +94,7 @@ hidage publish --peer <addr>      # …or push to a named peer instead
 hidage net-list                   # list all folders you've published
 hidage net-restore ./out --all    # recover from your friends: resolve the account,
                                   #   gather K-of-M shards, rebuild, restore (--repo <name>
-                                  #   for one; on a fresh machine add --bootstrap <friend addr>)
+                                  #   for one; on a fresh machine add --from <friend's card>)
 
 # reputation, audits, accounting
 hidage audit --peer <addr>        # challenge peers to prove they hold your shards
@@ -118,7 +118,7 @@ hidage accounting                 # bytes you store for peers vs. they store for
   (master key + identity). Keep it offline — anyone with it can decrypt your backups, and
   it's the only way to get your key back if you lose this machine. `hidage recover` reads
   the phrase from stdin and rebuilds the keyring (under a new passphrase). With the phrase
-  plus one friend's address (`--bootstrap`), `hidage net-restore` rebuilds the snapshots and files from the
+  plus one friend's contact card (`--from`), `hidage net-restore` rebuilds the snapshots and files from the
   network — no local `.hidage` or chunk store needed.
 
 ## End-to-end demo
@@ -163,8 +163,9 @@ reachability, the three stores (FS + hardlink cross-repo dedup and refcounted de
 keyed-store lease reap/renew), the keyring (deterministic derivation, wrong-pass,
 recovery-code roundtrip), and the repository end to end — snapshot/restore, `.hidage`
 exclusion, incremental-delta accounting, history/diff, `--replace`, and forget + prune.
-Networking: two-node object transfer, DHT provide/discover, push and inbound connections gated by the friend list, contact cards, signed
-head publish/resolve, proof-of-storage audits, reputation (recency decay: stale reverts to unproven, a recent
+Networking: two-node object transfer, push and inbound connections gated by the friend list,
+contact cards, a NATed node reached through a friend's relay, signed address records,
+signed head push/resolve (owner-only, newest wins), proof-of-storage audits, reputation (recency decay: stale reverts to unproven, a recent
 fail dominates banked passes), space accounting (ratio/free + revoke), the account manifest
 (upsert/find/roundtrip), Reed-Solomon encode/decode (incl. decode from any K subset),
 deterministic pack build + reassemble below and above the shard threshold, a
@@ -190,8 +191,8 @@ peers, one killed, full byte-identical recovery from the survivors).
 | `internal/account` | account manifest: one identity's index of all its network backups |
 | `internal/shard` | Reed-Solomon erasure coding (`klauspost/reedsolomon`): any K of M shards reconstruct |
 | `internal/pack` | group objects into packs, erasure-code them, Release descriptor for reassembly |
-| `internal/p2p` | libp2p host (peer key = identity); object/push/audit/head protocols, Kademlia DHT, signed head pointers |
-| `internal/netstore` | network-backed object source (DHT discover + fetch) for restoring from peers |
+| `internal/p2p` | libp2p host (peer key = identity); object/push/audit/head/address protocols between friends, NAT traversal (relays, hole punching) |
+| `internal/netstore` | network-backed object source (fetch from friends) for restoring |
 
 ## Known limitations
 
@@ -226,10 +227,11 @@ peers, one killed, full byte-identical recovery from the survivors).
   delta, with history and prune/GC.
 - **Phase 3 — networking + trust + recovery.** ✅ Done. Recovery code (`recovery-code` /
   `recover`); a friend list (`friend …`, formerly a trust whitelist); a **libp2p** node (`serve`) keyed by the
-  Ed25519 identity with object + push protocols and a **Kademlia DHT**; `publish`
+  Ed25519 identity with object + push protocols (originally over a Kademlia DHT, since
+  removed in favour of talking to friends directly); `publish`
   replicates a snapshot's objects (bytes, DAG nodes, chunks) to friends and posts a
   **signed head pointer**; `net-restore` rebuilds a backup from the network with only the
-  recovery phrase + a bootstrap peer.
+  recovery phrase + one friend's contact card.
 - **Phase 4 — reputation + redundancy.** ✅ Done. Proof-of-storage **audits** (challenge a
   peer to prove it still holds a shard, signed receipt) feed a per-peer **reputation**
   score; a **space-accounting** ledger enforces the 2–4× contribution ratio on accepted

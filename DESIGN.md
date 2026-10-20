@@ -227,19 +227,27 @@ small VPS running `serve` works as the group's relay, and overlay networks (Tail
 WireGuard, ZeroTier) work as plain addresses.
 
 A node is a **libp2p host whose peer ID is its Ed25519 identity** (so a recovered node has
-the same peer ID as the original). It speaks three things:
+the same peer ID as the original). There is no global discovery (no DHT): a node talks
+only to the friends in its list, and they are few enough to ask directly. It speaks:
 
 - **Object protocol** (`/hidage/object/1.0.0`) — request an object by content address,
-  receive its bytes. Objects are already encrypted/signed, so serving to anyone is safe.
+  receive its bytes. Objects are already encrypted/signed. A restoring node asks its
+  reachable friends in turn.
 - **Push protocol** (`/hidage/push/1.0.0`) — replicate a snapshot's objects to a peer that
   agrees to store them. The receiver identifies the sender from the secured connection's
-  public key, stores only for **friends**, then re-announces
-  what it stored to the DHT.
-- **Kademlia DHT** (`/hidage` prefix) — `Provide`/`FindProviders` map an object's content
-  address (a raw CIDv1 over its SHA-256) to the peers holding it, and a **signed head
-  pointer** (`/hidage/<ownerpubkey>` → an **account-manifest** content address) lets a peer
-  find *all* of an owner's backups with no local state. A namespaced record validator
-  verifies the head signature on put and get and selects the newest.
+  public key and stores only for **friends**.
+- **Head protocols** (`/hidage/head/1.0.0`, `/hidage/head-get/1.0.0`) — a **signed head
+  pointer** names the owner's **account-manifest** content address, so the owner can find
+  *all* of its backups with no local state. The owner pushes it to its friends on every
+  publish (a friend stores it only if the sender is the key that signed it); a recovering
+  owner asks its friends for it back (they answer only the owner's key) and keeps the newest
+  valid one.
+- **Address protocol** (`/hidage/addr/1.0.0`) — each node signs a record of its current
+  addresses (with a timestamp sequence number). A friend can ask a node for its own record
+  or for the last record it holds of another of its friends, so a friend whose address
+  changed can still be found through the others. Records are verified against the
+  subject's key and only a newer one replaces an older one. `serve` reconnects to friends
+  every few minutes and refreshes their records.
 
 An owner can back up many folders under one identity, so the head doesn't name a single
 backup — it names an **account manifest** (`internal/account`): a small object listing one
@@ -248,18 +256,19 @@ own — the signed head endorses its content address, and the fetcher verifies t
 
 `publish` gathers a snapshot's object closure (`repo.PublishSet`: snapshot bytes + every
 reachable DAG node + chunk), **erasure-codes** it (below), and spreads the resulting shards
-round-robin across every friend reachable at a stored address (falling back to a DHT
-lookup by peer ID), or the explicit `--peer` multiaddrs instead. Since the coding only helps across
+round-robin across every reachable friend (dialed at stored addresses, then at addresses
+learned from other friends), or the explicit `--peer` multiaddrs instead. Since the coding only helps across
 enough *distinct* peers, it reports the fault tolerance and `--min-peers` guards thin
 configurations. It then fetches the current account manifest,
 upserts this repo's
 entry (replacing it by `repoID`, never clobbering siblings), pushes the new Release + the
-new manifest to every peer, and points the head at the manifest. `net-restore` resolves the
+new manifest to every peer, and hands every friend reached a new signed head naming the
+manifest. `net-restore` resolves the
 head → fetches + verifies the manifest → selects a backup (`--repo <name>` / `--all` / the
 sole entry) → fetches that Release, gathers K-of-M shards per pack from whoever still has
 them, rebuilds the objects, and runs the ordinary restore walk against a local cache.
-(`net-list` just prints the manifest.) Resolving and publishing wait for the DHT routing
-table to populate (`WaitForPeers`) so a republish never reads a stale/empty manifest.
+(`net-list` just prints the manifest.) On a machine with no friend list yet, `--from
+<contact card | multiaddr>` names a friend to recover from.
 
 ---
 
@@ -330,11 +339,11 @@ Everything originally deferred past the local storage core is now built, except 
 explicitly marked out of scope:
 
 - **Networking** — ✅ *implemented* (`internal/p2p`, `internal/netstore`, see above):
-  libp2p host, object/push protocols, Kademlia DHT, signed head pointers.
+  libp2p host, object/push/head/address protocols between friends, NAT traversal.
 - **Friend list** — ✅ *implemented* (`internal/friends`): contact cards, friends-only
   connections and pushes.
 - **Disaster recovery** — ✅ *implemented* (see below): recover from the network with only
-  the recovery phrase + a bootstrap peer.
+  the recovery phrase + one friend's contact card.
 - **Reputation, audits, accounting** — ✅ *implemented* (`internal/reputation`,
   `internal/accounting`, audit protocol; see "Durability" above).
 - **Erasure-coded redundancy** — ✅ *implemented* (`internal/shard` Reed-Solomon +
@@ -352,8 +361,8 @@ with the master key (`fp` for each object is carried in its parent):
 
 ```
 head pointer ──▶ snapshot ──▶ root Ref ──▶ tree nodes ──▶ file nodes ──▶ chunk Refs
- (DHT, by         pull+verify    decrypt      decrypt        decrypt      pull + decrypt
-  owner pubkey)   (signature)
+ (from friends,    pull+verify    decrypt      decrypt        decrypt      pull + decrypt
+  owner-signed)    (signature)
 ```
 
 The three things this needs — all now in place:
@@ -367,16 +376,17 @@ The three things this needs — all now in place:
    single 32-byte root, exportable as a 24-word BIP39 phrase (`recovery-code`) and
    restorable with `recover`.
 
-3. **Find all backups with zero local state.** ✅ An IPNS-style **signed head pointer** in
-   the DHT, keyed by the owner's public key (`pubkey → account-manifest id`, signed by the
-   identity key), posted on `publish`. Recovery needs only the identity (from the recovery
+3. **Find all backups with zero local state.** ✅ A **signed head pointer**
+   (`account-manifest id`, signed by the identity key), handed to every friend on
+   `publish` and returned only to the owner's key. Recovery needs only the identity (from the recovery
    code) to locate the head, and the manifest enumerates every repository — no snapshot or
    repo id to remember.
 
 **Minimal recovery seed.** Recovering an arbitrarily large dataset needs only a tiny
 off-machine secret plus a way onto the network: the **24-word recovery phrase** (which
-reproduces both the master key and the identity) and at least one **bootstrap peer**. From
-there `net-restore` does: identity → DHT head lookup → fetch+verify snapshot → walk the
-DAG, pulling and decrypting nodes and chunks from providers → reassemble.
+reproduces both the master key and the identity) and one **friend's contact card**
+(`--from`). From there `net-restore` does: identity → ask friends for the head → fetch +
+verify the manifest and release → gather K-of-M shards from friends → reassemble → walk
+the DAG, decrypting nodes and chunks.
 
 See the [README roadmap](README.md#roadmap) for phase ordering.

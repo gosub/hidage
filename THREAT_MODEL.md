@@ -57,12 +57,9 @@ Identities are costless, so an attacker can mint many and multiply the per-ident
 free quota — the dominant Sybil lever. What is **not** vulnerable: reputation and
 accounting are **local and self-written** (your view = your own audits; credit is
 only written by your own `publish`), so Sybils cannot inflate their standing with
-you or trick your `serve` into over-accepting beyond `free`. Residual risks:
-**eclipse** (many Sybil IDs crowding a victim's DHT key to censor discovery —
-redundancy limits data loss but not censorship) and **whitewashing** (a peer with
-bad reputation discards its identity and rejoins clean with a fresh free quota).
-The robust mitigation is the friend-to-friend regime; costly identities
-(proof-of-work/stake) are out of scope.
+you or trick your `serve` into over-accepting beyond `free`. With the friends-only
+model (no DHT, inbound connections only from friends) Sybil identities have no way
+in: a new identity is useless until someone adds its contact card.
 
 ### Audit outsourcing
 The audit proves *someone* holds the bytes, not that *this* peer does. A lazy peer
@@ -88,9 +85,10 @@ Residual: the half-life is a fixed constant, not adaptive to your audit cadence,
 and reputation is still only as current as your last `hidage audit`.
 
 ### Head-pointer rollback
-Head records are owner-signed and newest-wins, but an eclipsing peer could serve an
-older *valid* signed head, resolving a recoverer to an older release (stale, not
-corrupt). Bounded by the same eclipse difficulty.
+Head records are owner-signed and newest-wins across all reachable friends, but a
+friend can withhold its record or serve an older *valid* one, resolving a recoverer
+to an older release (stale, not corrupt). It goes unnoticed only if every friend
+reached is stale.
 
 ### Denial of service
 Audits are cheap to send but force the holder to read+hash whole objects
@@ -101,7 +99,8 @@ lease GC reclaims it. Neither is rate-limited yet.
 
 - The user keeps the **24-word recovery phrase** safe and secret; anyone with it
   has full control, and losing it (and the keyring) makes data unrecoverable.
-- At least one honest **bootstrap peer** is reachable for discovery/recovery.
+- At least one honest **friend** is reachable for recovery, and its contact card is
+  kept with the recovery phrase.
 - The local machine running the client is not compromised while the keyring is
   unlocked.
 - Clocks are roughly synchronized (head-pointer newest-wins, storage leases).
