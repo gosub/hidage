@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -152,4 +155,64 @@ func connectExtra(ctx context.Context, node *p2p.Node, targets []string) ([]peer
 		out = append(out, pid)
 	}
 	return out, nil
+}
+
+// presentInvite dials a friend whose invite we hold and pairs with it: on
+// success the friend has added us, and we clear the token and take its fresh
+// card's addresses.
+func presentInvite(ctx context.Context, node *p2p.Node, book *friends.Book, f friends.Friend) error {
+	pid, err := f.PeerID()
+	if err != nil {
+		return err
+	}
+	c, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+	if err := node.ConnectAddrs(c, pid, f.Addrs); err != nil {
+		return err
+	}
+	pub, _ := hexPub(node)
+	mine, _, _ := ownCard(pub) // the serving node's addresses, not this (maybe one-shot) node's
+	reply, err := node.Pair(c, pid, f.PairToken, mine.Encode())
+	if errors.Is(err, p2p.ErrPairRefused) {
+		book.Update(f.PubKey, func(f *friends.Friend) error { f.PairToken = nil; return nil })
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	return book.Update(f.PubKey, func(f *friends.Friend) error {
+		f.PairToken, f.PairExpires = nil, time.Time{}
+		f.LastSeen = time.Now().UTC()
+		if theirs, err := friends.DecodeCard(reply); err == nil && theirs.PubKey.Equal(mustPub(f.PubKey)) && len(theirs.Addrs) > 0 {
+			f.Addrs, f.AddrSeq, f.AddrSig = theirs.AddrStrings(), 0, nil
+		}
+		return nil
+	})
+}
+
+// completePairings presents every pending invite whose inviter can be reached.
+func completePairings(ctx context.Context, node *p2p.Node, book *friends.Book) {
+	for _, f := range book.List() {
+		if !f.PairingPending() {
+			continue
+		}
+		if err := presentInvite(ctx, node, book, f); err == nil {
+			fmt.Printf("[friends] paired with %s\n", f.Nickname)
+		} else if errors.Is(err, p2p.ErrPairRefused) {
+			fmt.Printf("[friends] %s's invite was refused (used or expired); ask for a new one\n", f.Nickname)
+		}
+	}
+}
+
+func hexPub(node *p2p.Node) (ed25519.PublicKey, error) {
+	h, err := p2p.PeerPubKeyHex(node.ID())
+	if err != nil {
+		return nil, err
+	}
+	return mustPub(h), nil
+}
+
+func mustPub(h string) ed25519.PublicKey {
+	raw, _ := hex.DecodeString(h)
+	return ed25519.PublicKey(raw)
 }

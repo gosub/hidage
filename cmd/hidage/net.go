@@ -72,6 +72,13 @@ func newServeCmd() *cobra.Command {
 				book.Refresh() // pick up `friend add/rm` made while serving
 				return book.IsFriendPeer(id)
 			}
+			invites, err := openInvites()
+			if err != nil {
+				return err
+			}
+			// While an invite is open, strangers may connect, but only to pair:
+			// every other protocol checks friendship (WithFriends, hosting quota).
+			admit := func(id peer.ID) bool { return isFriend(id) || invites.Pending() }
 			if reach == p2p.ReachabilityAuto && !hasPublicInterface() {
 				// No public IP on any interface: behind a NAT unless a port is
 				// forwarded (then set reachability = "public"). Deciding now, rather
@@ -80,7 +87,8 @@ func newServeCmd() *cobra.Command {
 				reach = p2p.ReachabilityPrivate
 			}
 			node, err := p2p.New(kr.Identity(), nil, listen,
-				p2p.WithInboundFilter(isFriend), // friends only: refuse anyone else
+				p2p.WithInboundFilter(admit), // friends only (and invitees while an invite is open)
+				p2p.WithFriends(isFriend),
 				p2p.WithRelayService(isFriend),  // relay for friends while reachable
 				p2p.WithRelayCandidates(func() []peer.AddrInfo { return friendAddrInfos(book) }),
 				p2p.WithReachability(reach))
@@ -96,6 +104,26 @@ func newServeCmd() *cobra.Command {
 			}
 			node.EnableHeadStore(heads.Put, heads.Get) // owner-signed; returned to the owner on recovery
 			node.EnableAddrService(func(subject string) *p2p.AddrRecord { return storedAddrRecord(book, subject) })
+			node.EnablePairing(func(from peer.ID, token []byte, cardStr string) (string, bool) {
+				card, err := friends.DecodeCard(cardStr)
+				if err != nil {
+					return "", false
+				}
+				if pid, err := friends.PeerIDFromHex(hex.EncodeToString(card.PubKey)); err != nil || pid != from {
+					return "", false // the card must be the requester's own
+				}
+				inv, ok := invites.Consume(token)
+				if !ok {
+					return "", false
+				}
+				card.Token = nil
+				f, _, err := book.Add(card, inv.Nickname, inv.Give)
+				if err != nil {
+					return "", false
+				}
+				fmt.Printf("[friends] %s accepted your invite and is now a friend\n", f.Nickname)
+				return cardFor(kr.Identity().Public, node.ListenAddrs()).Encode(), true
+			})
 			node.EnableHosting(hosted,
 				func(ownerHex string) int64 {
 					f, ok := book.Get(ownerHex)
@@ -151,15 +179,19 @@ func nodeStateLoop(ctx context.Context, node *p2p.Node) {
 }
 
 // keepInTouchLoop periodically reconnects to friends (so they can relay for us
-// and we for them) and refreshes their signed address records.
+// and we for them), refreshes their signed address records, and presents any
+// invite we accepted while the inviter was unreachable.
 func keepInTouchLoop(ctx context.Context, node *p2p.Node, book *friends.Book) {
-	for {
+	for i := 0; ; i++ {
 		book.Refresh()
-		reachFriends(ctx, node, book, true)
+		completePairings(ctx, node, book)
+		if i%10 == 0 {
+			reachFriends(ctx, node, book, true)
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(5 * time.Minute):
+		case <-time.After(30 * time.Second): // reach friends every 5 minutes, pair sooner
 		}
 	}
 }

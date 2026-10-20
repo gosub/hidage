@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -109,13 +110,27 @@ func ownCard(pub ed25519.PublicKey) (*friends.Card, bool, error) {
 	if !running {
 		addrs = p2p.ResolveListenAddrs(settings.Listen)
 	}
+	return cardFor(pub, addrs), running, nil
+}
+
+// cardFor builds a contact card for pub with the given addresses.
+func cardFor(pub ed25519.PublicKey, addrs []string) *friends.Card {
+	settings, _ := config.Load()
 	c := &friends.Card{PubKey: pub, Nickname: settings.Name}
 	for _, a := range addrs {
 		if ma, err := multiaddr.NewMultiaddr(a); err == nil {
 			c.Addrs = append(c.Addrs, ma)
 		}
 	}
-	return c, running, nil
+	return c
+}
+
+func openInvites() (*friends.Invites, error) {
+	paths, err := config.Ensure()
+	if err != nil {
+		return nil, err
+	}
+	return friends.OpenInvites(paths.InvitesPath), nil
 }
 
 func newIDCmd() *cobra.Command {
@@ -164,15 +179,65 @@ func newFriendCmd() *cobra.Command {
 		Use:   "friend",
 		Short: "Manage the friends you back up to and host for",
 	}
-	cmd.AddCommand(friendAddCmd(), friendRmCmd(), friendSetCmd(), friendLsCmd())
+	cmd.AddCommand(friendInviteCmd(), friendAddCmd(), friendRmCmd(), friendSetCmd(), friendLsCmd())
+	return cmd
+}
+
+func friendInviteCmd() *cobra.Command {
+	var name, give string
+	var valid time.Duration
+	cmd := &cobra.Command{
+		Use:   "invite",
+		Short: "Print a single-use invite; whoever adds it becomes your friend (both ways)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pub, err := ownPublicKey()
+			if err != nil {
+				return err
+			}
+			settings, _ := config.Load()
+			quota := int64(settings.Hosting.DefaultGive)
+			if give != "" {
+				if quota, err = config.ParseSize(give); err != nil {
+					return err
+				}
+			}
+			invites, err := openInvites()
+			if err != nil {
+				return err
+			}
+			token, exp, err := invites.Create(name, quota, valid)
+			if err != nil {
+				return err
+			}
+			card, running, err := ownCard(pub)
+			if err != nil {
+				return err
+			}
+			card.Token, card.Expires = token, exp
+			fmt.Println("Send this to your friend; they run `hidage friend add <invite>`:")
+			fmt.Println()
+			fmt.Println(card.Encode())
+			fmt.Println()
+			fmt.Printf("It works once, until %s, and gives them %s here.\n", exp.Local().Format("2006-01-02 15:04"), config.FormatSize(quota))
+			fmt.Println("Anyone holding it can pair with you, so send it privately.")
+			if !running {
+				fmt.Println("Your node is not running: start `hidage serve` so the pairing can complete.")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&name, "name", "", "nickname for the friend who accepts (default: the one they choose)")
+	cmd.Flags().StringVar(&give, "give", "", "space to give them, e.g. 200GiB (default: hosting.default_give)")
+	cmd.Flags().DurationVar(&valid, "valid", 24*time.Hour, "how long the invite can be used")
 	return cmd
 }
 
 func friendAddCmd() *cobra.Command {
 	var name, give string
 	cmd := &cobra.Command{
-		Use:   "add <contact-card>",
-		Short: "Add a friend from their contact card (or refresh their addresses)",
+		Use:   "add <invite | contact-card>",
+		Short: "Add a friend from their invite or contact card (or refresh their addresses)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			card, err := friends.DecodeCard(args[0])
@@ -197,6 +262,9 @@ func friendAddCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if card.IsInvite() {
+				return acceptInvite(book, f, card)
+			}
 			if !isNew {
 				fmt.Printf("Updated %s (%s): %d address(es).\n", f.Nickname, f.Short(), len(f.Addrs))
 				return nil
@@ -209,6 +277,48 @@ func friendAddCmd() *cobra.Command {
 	cmd.Flags().StringVar(&name, "name", "", "nickname for this friend (default: the one in their card)")
 	cmd.Flags().StringVar(&give, "give", "", "space to give them, e.g. 200GiB (default: hosting.default_give)")
 	return cmd
+}
+
+// acceptInvite presents an invite to the inviter's node, now if our own node
+// isn't running (it needs our key), else by leaving it to the running node.
+func acceptInvite(book *friends.Book, f *friends.Friend, card *friends.Card) error {
+	if time.Now().After(card.Expires) {
+		return fmt.Errorf("this invite expired on %s; ask %s for a new one", card.Expires.Local().Format("2006-01-02 15:04"), f.Nickname)
+	}
+	if err := book.Update(f.PubKey, func(f *friends.Friend) error {
+		f.PairToken, f.PairExpires = card.Token, card.Expires
+		return nil
+	}); err != nil {
+		return err
+	}
+	fmt.Printf("Added %s (%s); you give them %s.\n", f.Nickname, f.Short(), config.FormatSize(f.Give))
+	if _, running := runningNodeAddrs(); running {
+		fmt.Println("Your running node will now pair with them (see `hidage friend ls`).")
+		return nil
+	}
+	kr, err := unlock()
+	if err != nil {
+		return err
+	}
+	node, err := p2p.New(kr.Identity(), nil, nil)
+	if err != nil {
+		return err
+	}
+	defer node.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	g, _ := book.Get(f.PubKey)
+	if err := presentInvite(ctx, node, book, g); err != nil {
+		if errors.Is(err, p2p.ErrPairRefused) {
+			return fmt.Errorf("%s's node refused the invite (already used?); ask for a new one", f.Nickname)
+		}
+		fmt.Printf("Could not reach %s's node yet (%v).\n", f.Nickname, err)
+		fmt.Printf("Run `hidage serve`: it retries until the invite expires (%s). If the invite was\n"+
+			"already used, the retries fail too; ask %s for a new one.\n", card.Expires.Local().Format("2006-01-02 15:04"), f.Nickname)
+		return nil
+	}
+	fmt.Printf("Paired: %s now has you as a friend too.\n", f.Nickname)
+	return nil
 }
 
 func friendRmCmd() *cobra.Command {
@@ -340,6 +450,9 @@ func friendLsCmd() *cobra.Command {
 				seen := "never"
 				if !f.LastSeen.IsZero() {
 					seen = humanAge(time.Since(f.LastSeen)) + " ago"
+				}
+				if f.PairingPending() {
+					seen = "pairing (their node not reached yet)"
 				}
 				fmt.Printf("%-16s  %-17s  %-17s  %-24s  %s\n", f.Nickname, here, there, audit, seen)
 				if verbose {

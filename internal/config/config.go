@@ -38,6 +38,8 @@ type Paths struct {
 	TrustPath string
 	// FriendsPath is the node's friend list (address book).
 	FriendsPath string
+	// InvitesPath holds pending invitations (hashed tokens).
+	InvitesPath string
 }
 
 // Resolve computes the config paths without creating anything on disk.
@@ -57,6 +59,7 @@ func Resolve() (Paths, error) {
 		KeyringPath: filepath.Join(dir, "keyring.json"),
 		TrustPath:   filepath.Join(dir, "trust.json"),
 		FriendsPath: filepath.Join(dir, "friends.json"),
+		InvitesPath: filepath.Join(dir, "invites.json"),
 	}, nil
 }
 

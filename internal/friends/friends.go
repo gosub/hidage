@@ -45,6 +45,16 @@ type Friend struct {
 
 	// LastAudit is the most recent proof-of-storage check of our data on them.
 	LastAudit *Audit `json:"lastAudit,omitempty"`
+
+	// PairToken is set while we hold their invite but haven't yet presented it
+	// (their node was unreachable); our node retries until PairExpires.
+	PairToken   []byte    `json:"pairToken,omitempty"`
+	PairExpires time.Time `json:"pairExpires,omitzero"`
+}
+
+// PairingPending reports whether an unexpired invite still has to be presented.
+func (f *Friend) PairingPending() bool {
+	return len(f.PairToken) > 0 && time.Now().Before(f.PairExpires)
 }
 
 // Audit is the outcome of challenging a friend to prove it holds our shards.
