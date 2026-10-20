@@ -9,7 +9,7 @@ reputation ledger tracks which hosts are reliable.
 > **Status: networked + redundant.** The encrypted **versioned storage core**
 > (content-addressed repository with incremental snapshots, history, diff, prune)
 > distributes over a **libp2p P2P network**: nodes discover objects via a Kademlia DHT;
-> a snapshot is **erasure-coded** and its shards spread across trusted peers (any K of M
+> a snapshot is **erasure-coded** and its shards spread across your friends' nodes (any K of M
 > reconstruct, so it survives losing a minority); peers are kept honest by **proof-of-
 > storage audits** feeding a **reputation** score, and a **space-accounting** ledger
 > enforces the contribute-more-than-you-consume model. A backup is recoverable on a fresh
@@ -78,22 +78,23 @@ hidage prune                      # … then GC objects no snapshot references
 
 hidage recover                    # on a new machine: rebuild the keyring from the phrase
 
-hidage trust add <pubkey>         # trust a peer's key (bypass reputation, friend-to-friend)
-hidage trust block <pubkey>       # block a peer's key (never interact)
-hidage trust list                 # show trusted / blocked keys
+hidage id                         # your key, addresses and contact card (no passphrase needed)
+hidage friend add <card>          # add a friend from their contact card (they add yours too)
+hidage friend set bob --give 200GiB   # change a friend's nickname or the space you give them
+hidage friend ls                  # list friends; `friend rm <name>` removes one
 
 # networking
-hidage serve --listen /ip4/0.0.0.0/tcp/4001   # run a node: join the DHT, serve objects,
-                                              #   accept pushes within trust + space budget;
-                                              #   --lease H reclaims un-renewed hosted shards
-hidage publish --trusted --redundancy 3       # erasure-code the latest snapshot and spread
-                                              #   shards across every trusted peer found online
-hidage publish --peer <addr> --min-peers 3    # …or name peers explicitly; --min-peers guards
-                                              #   against too few for the redundancy to matter
-hidage net-list --bootstrap <addr>            # list all folders you've published
-hidage net-restore ./out --all --bootstrap <addr>   # recover from the network: resolve the
-                                              #   account, gather K-of-M shards, rebuild, restore
-                                              #   (--repo <name> for just one)
+hidage serve                      # run a node: serve objects, accept pushes from friends
+                                  #   only (connections from anyone else are refused),
+                                  #   within their space budget; leases reclaim un-renewed data
+hidage publish                    # erasure-code the latest snapshot and spread the shards
+                                  #   across every reachable friend (--redundancy, --min-peers
+                                  #   default to config.toml)
+hidage publish --peer <addr>      # …or push to a named peer instead
+hidage net-list                   # list all folders you've published
+hidage net-restore ./out --all    # recover from your friends: resolve the account,
+                                  #   gather K-of-M shards, rebuild, restore (--repo <name>
+                                  #   for one; on a fresh machine add --bootstrap <friend addr>)
 
 # reputation, audits, accounting
 hidage audit --peer <addr>        # challenge peers to prove they hold your shards
@@ -117,7 +118,7 @@ hidage accounting                 # bytes you store for peers vs. they store for
   (master key + identity). Keep it offline — anyone with it can decrypt your backups, and
   it's the only way to get your key back if you lose this machine. `hidage recover` reads
   the phrase from stdin and rebuilds the keyring (under a new passphrase). With the phrase
-  plus a bootstrap peer, `hidage net-restore` rebuilds the snapshots and files from the
+  plus one friend's address (`--bootstrap`), `hidage net-restore` rebuilds the snapshots and files from the
   network — no local `.hidage` or chunk store needed.
 
 ## End-to-end demo
@@ -162,7 +163,7 @@ reachability, the three stores (FS + hardlink cross-repo dedup and refcounted de
 keyed-store lease reap/renew), the keyring (deterministic derivation, wrong-pass,
 recovery-code roundtrip), and the repository end to end — snapshot/restore, `.hidage`
 exclusion, incremental-delta accounting, history/diff, `--replace`, and forget + prune.
-Networking: two-node object transfer, DHT provide/discover, push gated by trust, signed
+Networking: two-node object transfer, DHT provide/discover, push and inbound connections gated by the friend list, contact cards, signed
 head publish/resolve, proof-of-storage audits, reputation (recency decay: stale reverts to unproven, a recent
 fail dominates banked passes), space accounting (ratio/free + revoke), the account manifest
 (upsert/find/roundtrip), Reed-Solomon encode/decode (incl. decode from any K subset),
@@ -174,11 +175,11 @@ peers, one killed, full byte-identical recovery from the survivors).
 
 | Path | Responsibility |
 |---|---|
-| `cmd/hidage` | CLI: snapshot/restore/diff/prune, recovery-code/recover, trust, serve/publish/net-restore/net-list, audit/reputation/accounting |
+| `cmd/hidage` | CLI: snapshot/restore/diff/prune, recovery-code/recover, id/friend, serve/publish/net-restore/net-list, audit/reputation/accounting |
 | `internal/config` | `config.toml` settings, config + data-store path resolution (`HIDAGE_STORE`) |
 | `internal/keyring` | root secret (wrapped under passphrase) → master key + identity; BIP39 recovery code |
 | `internal/identity` | Ed25519 keypair derived from the keyring (libp2p peer key) |
-| `internal/trust` | peer trust policy: whitelist / blocklist, consulted before reputation |
+| `internal/friends` | friend list (key, nickname, addresses, quota) and `hidage1:` contact cards |
 | `internal/reputation` | per-peer audit pass/fail → recency-weighted (time-decayed), Laplace-smoothed score |
 | `internal/accounting` | per-peer space ledger + contribution-ratio enforcement |
 | `internal/crypto` | Argon2id KEK, key wrap/unwrap, deterministic content-addressed seal |
@@ -199,8 +200,8 @@ peers, one killed, full byte-identical recovery from the survivors).
 > and trust. See [`THREAT_MODEL.md`](THREAT_MODEL.md) for the full adversarial analysis.
 
 
-- **Peer selection** — `--peer` names hosts explicitly and `--trusted` spreads to your
-  trusted peers. There is no discovery of strangers' storage. Erasure coding only helps across enough distinct
+- **Peer selection** — `publish` spreads to your reachable friends, or `--peer` names a
+  host explicitly. There is no discovery of strangers' storage. Erasure coding only helps across enough distinct
   peers, so `--min-peers` guards against (and a single-peer publish warns about)
   configurations with no fault tolerance.
 - **Pseudonymous, not IP-anonymous** — peers are identified by public key, but their IP
@@ -220,9 +221,9 @@ peers, one killed, full byte-identical recovery from the survivors).
   + Merkle DAG + signed snapshots, so updating/changing/removing files re-stores only the
   delta, with history and prune/GC.
 - **Phase 3 — networking + trust + recovery.** ✅ Done. Recovery code (`recovery-code` /
-  `recover`); trust/whitelist policy (`trust …`); a **libp2p** node (`serve`) keyed by the
+  `recover`); a friend list (`friend …`, formerly a trust whitelist); a **libp2p** node (`serve`) keyed by the
   Ed25519 identity with object + push protocols and a **Kademlia DHT**; `publish`
-  replicates a snapshot's objects (bytes, DAG nodes, chunks) to trusted peers and posts a
+  replicates a snapshot's objects (bytes, DAG nodes, chunks) to friends and posts a
   **signed head pointer**; `net-restore` rebuilds a backup from the network with only the
   recovery phrase + a bootstrap peer.
 - **Phase 4 — reputation + redundancy.** ✅ Done. Proof-of-storage **audits** (challenge a
@@ -232,6 +233,6 @@ peers, one killed, full byte-identical recovery from the survivors).
   spread across peers, so it survives the loss of any minority of them.
 
 > A paid storage service is **only an idea, not a planned feature.** The chosen
-> primitives (signed pubkey identities + trust policy, content-addressed verifiable
+> primitives (signed pubkey identities + friend list, content-addressed verifiable
 > shards, audit-backed reputation) are deliberately enough to make one *possible* later
 > without any market-specific work in scope today.

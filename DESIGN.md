@@ -190,25 +190,22 @@ cross-repository coordination or registry is needed — the filesystem refcount 
 
 ---
 
-## Trust policy (`internal/trust`)
+## Friend list (`internal/friends`)
 
-A node keeps a local policy of peer public keys it has an opinion about, in
-`~/.config/hidage/trust.json` (no secrets — just public keys). When the networking
-layer decides whether to place shards on a peer or accept them from one, it consults the
-policy first:
+A node keeps the list of its friends in `~/.config/hidage/friends.json` (no secrets):
+per friend, the Ed25519 public key, a local nickname, the last known addresses, the quota
+this node gives them, and when it last saw them. hidage is friends-only, so this list is
+the whole trust model: `serve` refuses inbound connections from any other key (a libp2p
+connection gater checked once the remote is authenticated) and accepts pushes only from
+friends, and `publish` pushes to friends.
 
-```
-Blocked  → never interact (overrides everything)
-Trusted  → interact regardless of reputation (friend-to-friend, à la Syncthing pairing)
-Neutral  → defer to the reputation score (Phase 4)
-```
-
-`Verdict(pubkey)` returns one of those three; trusted and blocked are mutually exclusive
-(trusting a key clears any block and vice-versa). Managed via `hidage trust
-add/remove/block/unblock/list`. The decision is a pure function of `(pubkey, policy)` plus
-the future reputation score, so it is fully testable before any networking exists and
-simply becomes load-bearing once peers are real. The networking layer consults it when
-accepting pushed objects.
+Friends are added from a **contact card**, `hidage1:` + base32 of a compact binary payload
+(public key, suggested nickname, multiaddrs) with a 4-byte SHA-256 checksum so a damaged
+copy-paste is caught. `hidage id` prints the node's card (from the running node's actual
+addresses, published in `node.json`, or else from `listen` in `config.toml`); `hidage friend
+add <card>` adds the friend or refreshes their addresses. A legacy `trust.json` is imported
+once (trusted keys become friends without addresses; blocked keys are dropped). The list
+is re-read when its file changes, so `friend add/rm` applies to a running node.
 
 ---
 
@@ -221,7 +218,7 @@ the same peer ID as the original). It speaks three things:
   receive its bytes. Objects are already encrypted/signed, so serving to anyone is safe.
 - **Push protocol** (`/hidage/push/1.0.0`) — replicate a snapshot's objects to a peer that
   agrees to store them. The receiver identifies the sender from the secured connection's
-  public key and consults its **trust policy** (store unless `Blocked`), then re-announces
+  public key, stores only for **friends**, then re-announces
   what it stored to the DHT.
 - **Kademlia DHT** (`/hidage` prefix) — `Provide`/`FindProviders` map an object's content
   address (a raw CIDv1 over its SHA-256) to the peers holding it, and a **signed head
@@ -236,9 +233,8 @@ own — the signed head endorses its content address, and the fetcher verifies t
 
 `publish` gathers a snapshot's object closure (`repo.PublishSet`: snapshot bytes + every
 reachable DAG node + chunk), **erasure-codes** it (below), and spreads the resulting shards
-round-robin across the chosen peers, from two sources: `--peer` (explicit multiaddrs) and
-`--trusted` (every trusted key found online via the DHT — `PeerIDFromPubKeyHex` +
-`DialPeerID`). Since the coding only helps across
+round-robin across every friend reachable at a stored address (falling back to a DHT
+lookup by peer ID), or the explicit `--peer` multiaddrs instead. Since the coding only helps across
 enough *distinct* peers, it reports the fault tolerance and `--min-peers` guards thin
 configurations. It then fetches the current account manifest,
 upserts this repo's
@@ -271,9 +267,8 @@ These keep distributed data recoverable and keep peers honest.
   kept **local and self-written** (your view = your own audits; not gossiped, so Sybils
   can't inject standing). Decay means recent audits dominate: banked old passes can't mask
   a recent failure, and a peer not audited in a long time fades back toward *unproven*. The
-  trust policy's *neutral* verdict defers here: a peer is used unless it is *proven bad*
-  (enough recent history and a low score); unproven/little-history peers are still used.
-  `publish` filters target peers through `trust` then reputation.
+  scores are shown by `status` and `reputation`; they no longer gate placement (friends
+  are chosen by the user).
 
 - **Space accounting** (`internal/accounting`) — a per-peer ledger of bytes stored *for
   them* vs. *by them*. On accepting a push, a node enforces a contribution ratio: it stores
@@ -321,8 +316,8 @@ explicitly marked out of scope:
 
 - **Networking** — ✅ *implemented* (`internal/p2p`, `internal/netstore`, see above):
   libp2p host, object/push protocols, Kademlia DHT, signed head pointers.
-- **Trust / whitelist** — ✅ *implemented* (`internal/trust`): prefer or block specific keys
-  before reputation; consulted when accepting pushes.
+- **Friend list** — ✅ *implemented* (`internal/friends`): contact cards, friends-only
+  connections and pushes.
 - **Disaster recovery** — ✅ *implemented* (see below): recover from the network with only
   the recovery phrase + a bootstrap peer.
 - **Reputation, audits, accounting** — ✅ *implemented* (`internal/reputation`,

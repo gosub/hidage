@@ -32,13 +32,12 @@ adversarial gaps** — honestly, so nothing is relied on that shouldn't be. See
 
 ## Trust model — friends only
 
-hidage is backup **with friends**: you `trust add` the public keys of people you
-know and publish only to them (`--peer` / `--trusted`). There is no discovery of,
-or publishing to, strangers' storage. The incentive/Sybil problems below are
-largely mitigated because participation is gated by out-of-band social trust; the
-ones that remain come from `serve` still accepting pushes from non-blocked
-unknown keys under the free quota (to be replaced by friends-only acceptance, see
-[`docs/friends-only.md`](docs/friends-only.md)).
+hidage is backup **with friends**: you `friend add` the contact cards of people
+you know, publish only to them, and `serve` refuses inbound connections from
+anyone else (a connection gater on the authenticated peer key). There is no
+discovery of, or publishing to, strangers' storage. The incentive/Sybil problems
+below are therefore largely moot: they apply only to a friend misbehaving, and
+are listed for that case (see [`docs/friends-only.md`](docs/friends-only.md)).
 
 ## Known adversarial gaps
 
