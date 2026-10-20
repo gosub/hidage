@@ -78,7 +78,9 @@ hidage prune                      # … then GC objects no snapshot references
 hidage recover                    # on a new machine: rebuild the keyring from the phrase
 
 hidage id                         # your key, addresses and contact card (no passphrase needed)
-hidage friend add <card>          # add a friend from their contact card (they add yours too)
+hidage friend invite              # print a single-use invite (valid 24h)
+hidage friend add <invite>        # accept it: you become friends both ways
+hidage friend add <card>          # or add a contact card (they must add yours too)
 hidage friend set bob --give 200GiB   # change a friend's nickname or the space you give them
 hidage friend ls                  # list friends; `friend rm <name>` removes one
 

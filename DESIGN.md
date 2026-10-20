@@ -203,7 +203,15 @@ Friends are added from a **contact card**, `hidage1:` + base32 of a compact bina
 (public key, suggested nickname, multiaddrs) with a 4-byte SHA-256 checksum so a damaged
 copy-paste is caught. `hidage id` prints the node's card (from the running node's actual
 addresses, published in `node.json`, or else from `listen` in `config.toml`); `hidage friend
-add <card>` adds the friend or refreshes their addresses. A legacy `trust.json` is imported
+add <card>` adds the friend or refreshes their addresses. **Invites** make pairing one step: `friend invite` stores a random 16-byte token (only its
+hash is kept, with an expiry, 24 h by default) and prints this node's card with the token
+appended. `friend add <invite>` adds the inviter and presents the token over
+`/hidage/pair/1.0.0` along with its own card; the inviter's node checks that the card is the
+requester's own key, consumes the token and adds the invitee, so the friendship is mutual.
+If the inviter's node can't be reached yet, the invitee's running node retries until the
+invite expires. While an invite is open the inviter's node lets unknown peers connect, but
+serves them only pairing: head records, friends' address records and hosting all check
+friendship. A legacy `trust.json` is imported
 once (trusted keys become friends without addresses; blocked keys are dropped). The list
 is re-read when its file changes, so `friend add/rm` applies to a running node.
 

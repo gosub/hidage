@@ -54,6 +54,12 @@ Identities are costless, but with the friends-only model (no DHT, no free quota,
 inbound connections only from friends) a minted identity has no way in: it is
 useless until someone adds its contact card.
 
+### Leaked invites
+An invite lets whoever holds it pair once until it expires (24 h by default), like an
+invite link: send it privately. `friend ls` shows every friend and `friend rm` revokes one.
+While any invite is open, `serve` accepts connections from unknown keys, but answers them
+only on the pairing protocol.
+
 ### Audit outsourcing
 The audit proves *someone* holds the bytes, not that *this* peer does. A lazy peer
 could fetch a shard from a peer that actually stored it, then answer. The challenge
