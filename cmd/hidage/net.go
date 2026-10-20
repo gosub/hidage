@@ -19,31 +19,13 @@ import (
 	"hidage/internal/accounting"
 	"hidage/internal/config"
 	"hidage/internal/dag"
+	"hidage/internal/friends"
 	"hidage/internal/netstore"
 	"hidage/internal/p2p"
 	"hidage/internal/pack"
 	"hidage/internal/repo"
-	"hidage/internal/reputation"
 	"hidage/internal/store"
-	"hidage/internal/trust"
 )
-
-// acceptablePeer reports whether to push to a peer: never if blocked, always if
-// explicitly trusted, otherwise unless its audit reputation is known-bad.
-func acceptablePeer(policy *trust.Policy, rep *reputation.Store, pubHex string) bool {
-	raw, err := hex.DecodeString(pubHex)
-	if err != nil || len(raw) != ed25519.PublicKeySize {
-		return false
-	}
-	switch policy.Verdict(ed25519.PublicKey(raw)) {
-	case trust.Blocked:
-		return false
-	case trust.Trusted:
-		return true
-	default:
-		return !rep.Bad(pubHex)
-	}
-}
 
 // publishedStore is the node-wide store of objects this node serves to the network.
 func publishedStore() (*store.KeyedStore, error) {
@@ -64,7 +46,7 @@ func newServeCmd() *cobra.Command {
 	var leaseHours int
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Run a node: serve objects, accept pushes from trusted peers, join the DHT",
+		Short: "Run a node: serve objects, accept pushes from friends, join the DHT",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kr, err := unlock()
@@ -96,7 +78,7 @@ func newServeCmd() *cobra.Command {
 			if err := node.EnableDHT(ctx); err != nil {
 				return err
 			}
-			policy, err := trust.Load(paths.TrustPath)
+			book, err := loadFriends()
 			if err != nil {
 				return err
 			}
@@ -114,34 +96,42 @@ func newServeCmd() *cobra.Command {
 			free := freeMiB << 20
 			node.EnablePush(pub,
 				func(senderPub []byte, cumulative int64) bool {
-					if policy.Verdict(ed25519.PublicKey(senderPub)) == trust.Blocked {
-						return false
+					book.Refresh() // pick up `friend add/rm` made while serving
+					if !book.IsFriend(hex.EncodeToString(senderPub)) {
+						return false // friends only
 					}
 					// cumulative is what this stream would have stored so far; the
 					// ledger checks it stays within ratio×reciprocation + free.
 					return ledger.Allow(hex.EncodeToString(senderPub), cumulative, ratio, free)
 				},
 				func(senderPub []byte, b int64) {
-					ledger.AddStoredForThem(hex.EncodeToString(senderPub), b)
+					pubHex := hex.EncodeToString(senderPub)
+					ledger.AddStoredForThem(pubHex, b)
+					book.Update(pubHex, func(f *friends.Friend) error { f.LastSeen = time.Now().UTC(); return nil })
 				})
-			if err := node.Bootstrap(ctx, bootstrap); err != nil {
+			if err := joinNetwork(ctx, node, bootstrap); err != nil {
 				return err
 			}
 			go reprovideLoop(ctx, node, pub)
 			go republishHeadsLoop(ctx, node, heads)
 			go gcLoop(ctx, pub, time.Duration(leaseHours)*time.Hour)
 
+			if err := writeNodeState(node.ListenAddrs()); err != nil {
+				return err
+			}
+			defer os.Remove(nodeStatePath())
 			fmt.Println("hidage node listening; addresses:")
 			for _, a := range node.Addrs() {
 				fmt.Printf("  %s\n", a)
 			}
+			fmt.Println("Friends add you with the card from `hidage id --card`.")
 			fmt.Println("Ctrl-C to stop.")
 			waitForSignal()
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&listen, "listen", "", "listen multiaddr (default: first `listen` in config.toml)")
-	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
+	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s) (default: your friends)")
 	cmd.Flags().Float64Var(&ratio, "ratio", accounting.DefaultRatio, "max bytes stored per peer per byte they store for us")
 	cmd.Flags().Int64Var(&freeMiB, "free", accounting.DefaultFreeQuota>>20, "free quota per peer, in MiB (no reciprocation required)")
 	cmd.Flags().IntVar(&leaseHours, "lease", 0, "hosted-shard lease in hours; data not renewed within this is reclaimed (default: hosting.lease_days)")
@@ -176,7 +166,7 @@ func gcLoop(ctx context.Context, blobs *store.KeyedStore, lease time.Duration) {
 func newPublishCmd() *cobra.Command {
 	var bootstrap, peers []string
 	var redundancy float64
-	var useTrusted bool
+	var useFriends bool
 	var minPeers int
 	cmd := &cobra.Command{
 		Use:   "publish",
@@ -201,6 +191,17 @@ func newPublishCmd() *cobra.Command {
 			}
 			if snap == nil {
 				return fmt.Errorf("no snapshots to publish")
+			}
+			// Check where to publish before the expensive packing and networking.
+			book, err := loadFriends()
+			if err != nil {
+				return err
+			}
+			if len(peers) == 0 {
+				useFriends = true
+				if len(book.List()) == 0 {
+					return fmt.Errorf("no friends to publish to; add one with `hidage friend add <card>` (or pass --peer)")
+				}
 			}
 			objs, err := r.PublishSet(snap)
 			if err != nil {
@@ -236,7 +237,7 @@ func newPublishCmd() *cobra.Command {
 			if err := node.EnableDHT(ctx); err != nil {
 				return err
 			}
-			if err := node.Bootstrap(ctx, bootstrap); err != nil {
+			if err := joinNetwork(ctx, node, bootstrap); err != nil {
 				return err
 			}
 			node.WaitForPeers(ctx, 1, 15*time.Second) // settle the DHT before record ops
@@ -259,25 +260,13 @@ func newPublishCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			policy, err := trust.Load(paths.TrustPath)
-			if err != nil {
-				return err
-			}
-			rep, err := reputation.Load(paths.ReputationPath)
-			if err != nil {
-				return err
-			}
 			ledger, err := accounting.Load(paths.AccountingPath)
 			if err != nil {
 				return err
 			}
 
-			if len(peers) == 0 && !useTrusted {
-				return fmt.Errorf("specify where to publish: --peer <addr> and/or --trusted")
-			}
-
 			// Collect candidate peers: explicit --peer multiaddrs, plus (with
-			// --trusted) every trusted key located online via the DHT.
+			// --friends) every friend reachable at a known address.
 			seen := map[peer.ID]bool{}
 			var accepted []peerID
 			add := func(pid peer.ID) {
@@ -286,10 +275,6 @@ func newPublishCmd() *cobra.Command {
 				}
 				seen[pid] = true
 				pubHex, _ := p2p.PeerPubKeyHex(pid)
-				if pubHex != "" && !acceptablePeer(policy, rep, pubHex) {
-					fmt.Printf("  %s: skipped (blocked or low reputation)\n", pid)
-					return
-				}
 				accepted = append(accepted, peerID{id: pid, pubHex: pubHex})
 			}
 			for _, addr := range peers {
@@ -300,22 +285,21 @@ func newPublishCmd() *cobra.Command {
 				}
 				add(pid)
 			}
-			if useTrusted {
-				trusted, _ := policy.List()
-				for _, pubHex := range trusted {
-					pid, err := p2p.PeerIDFromPubKeyHex(pubHex)
+			if useFriends {
+				for _, f := range book.List() {
+					pid, err := f.PeerID()
 					if err != nil {
 						continue
 					}
-					if err := node.DialPeerID(ctx, pid); err != nil {
-						fmt.Printf("  %s: trusted peer unreachable (%v)\n", pid, err)
+					if err := node.ConnectAddrs(ctx, pid, f.Addrs); err != nil {
+						fmt.Printf("  %s: unreachable (%v)\n", f.Nickname, err)
 						continue
 					}
 					add(pid)
 				}
 			}
 			if len(accepted) == 0 {
-				return fmt.Errorf("no acceptable peers reachable to publish to")
+				return fmt.Errorf("no friends reachable to publish to (see `hidage friend ls`)")
 			}
 			if len(accepted) < minPeers {
 				return fmt.Errorf("only %d acceptable peer(s) reachable, need at least --min-peers=%d", len(accepted), minPeers)
@@ -373,9 +357,9 @@ func newPublishCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
-	cmd.Flags().StringArrayVar(&peers, "peer", nil, "storage peer multiaddr(s) to push to")
-	cmd.Flags().BoolVar(&useTrusted, "trusted", false, "also push to every trusted peer found online (see `hidage trust`)")
+	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s) (default: your friends)")
+	cmd.Flags().StringArrayVar(&peers, "peer", nil, "push to this peer multiaddr instead of your friends")
+	cmd.Flags().BoolVar(&useFriends, "friends", false, "push to every reachable friend (the default when no --peer is given)")
 	cmd.Flags().IntVar(&minPeers, "min-peers", 0, "fail unless at least this many acceptable peers are reachable (default: backup.min_friends)")
 	cmd.Flags().Float64Var(&redundancy, "redundancy", 0, "shards to emit per shard needed, e.g. 2.0 tolerates losing half (default: backup.redundancy)")
 	return cmd
@@ -485,7 +469,7 @@ func newNetRestoreCmd() *cobra.Command {
 			if err := node.EnableDHT(ctx); err != nil {
 				return err
 			}
-			if err := node.Bootstrap(ctx, bootstrap); err != nil {
+			if err := joinNetwork(ctx, node, bootstrap); err != nil {
 				return err
 			}
 
@@ -552,7 +536,7 @@ func newNetRestoreCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
+	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s) (default: your friends)")
 	cmd.Flags().StringVar(&ownerHex, "owner", "", "owner public key hex (default: your own)")
 	cmd.Flags().StringVar(&repoSel, "repo", "", "which backup to restore (name or repo-id prefix)")
 	cmd.Flags().BoolVar(&all, "all", false, "restore every backup in the account")

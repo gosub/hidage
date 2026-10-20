@@ -116,7 +116,7 @@ func (n *Node) PushObjects(ctx context.Context, p peer.ID, objs map[string][]byt
 		return 0, fmt.Errorf("read accept status: %w", err)
 	}
 	if status[0] == 0 {
-		return 0, fmt.Errorf("peer %s refused (not trusted?)", p)
+		return 0, fmt.Errorf("peer %s refused (are you on their friend list?)", p)
 	}
 
 	bw := bufio.NewWriter(s)

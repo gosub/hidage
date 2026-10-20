@@ -89,7 +89,7 @@ func (n *Node) Provide(ctx context.Context, id string) error {
 }
 
 // DialPeerID locates a peer by ID via the DHT and connects to it. Used to reach
-// a trusted peer known only by its public key (no multiaddr supplied).
+// a friend known only by its public key (no multiaddr supplied).
 func (n *Node) DialPeerID(ctx context.Context, pid peer.ID) error {
 	ai, err := n.dht.FindPeer(ctx, pid)
 	if err != nil {

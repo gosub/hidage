@@ -45,7 +45,7 @@ func newNetListCmd() *cobra.Command {
 			if err := node.EnableDHT(ctx); err != nil {
 				return err
 			}
-			if err := node.Bootstrap(ctx, bootstrap); err != nil {
+			if err := joinNetwork(ctx, node, bootstrap); err != nil {
 				return err
 			}
 
@@ -83,7 +83,7 @@ func newNetListCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
+	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s) (default: your friends)")
 	cmd.Flags().StringVar(&ownerHex, "owner", "", "owner public key hex (default: your own)")
 	return cmd
 }

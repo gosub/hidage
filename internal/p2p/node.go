@@ -190,7 +190,7 @@ func PeerIDFromPubKeyHex(h string) (peer.ID, error) {
 }
 
 // PeerPubKeyHex returns the hex Ed25519 public key for a peer ID (the key is
-// inlined in the ID), matching the format used by the trust and reputation stores.
+// inlined in the ID), matching the format used by the friend list and reputation store.
 func PeerPubKeyHex(id peer.ID) (string, error) {
 	pub, err := id.ExtractPublicKey()
 	if err != nil {

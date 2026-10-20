@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"syscall"
 
 	"golang.org/x/term"
 
 	"hidage/internal/config"
 	"hidage/internal/keyring"
+	"hidage/internal/p2p"
 	"hidage/internal/repo"
 )
 
@@ -101,4 +104,45 @@ func discoverRepoNoKey() (*repo.Repo, error) {
 		return nil, fmt.Errorf("not inside a hidage repository (run `hidage snapshot` to create one)")
 	}
 	return repo.Open(folder, nil, config.DataStoreDir())
+}
+
+// processAlive reports whether a process with this pid exists.
+func processAlive(pid int) bool {
+	return pid > 0 && syscall.Kill(pid, 0) == nil
+}
+
+// bootstrapAddrs returns the explicit --bootstrap addresses, or, when none were
+// given, every known address of every friend (as full /p2p multiaddrs), so
+// networked commands need no flags once friends are added.
+func bootstrapAddrs(explicit []string) []string {
+	if len(explicit) > 0 {
+		return explicit
+	}
+	book, err := loadFriends()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, f := range book.List() {
+		pid, err := f.PeerID()
+		if err != nil {
+			continue
+		}
+		for _, a := range f.Addrs {
+			out = append(out, a+"/p2p/"+pid.String())
+		}
+	}
+	return out
+}
+
+// joinNetwork connects node to the network: the explicit --bootstrap peers (all
+// unreachable is an error), or else the friends (none online is only a note, so
+// a node can start before its friends do).
+func joinNetwork(ctx context.Context, node *p2p.Node, explicit []string) error {
+	err := node.Bootstrap(ctx, bootstrapAddrs(explicit))
+	if err != nil && len(explicit) == 0 {
+		fmt.Fprintln(os.Stderr, "note: none of your friends is reachable right now")
+		return nil
+	}
+	return err
 }
