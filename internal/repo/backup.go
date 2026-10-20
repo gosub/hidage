@@ -17,12 +17,25 @@ type SnapshotStats struct {
 	NewObjects   int      // objects this snapshot actually wrote (the delta)
 	Pruned       int      // objects reclaimed when --replace dropped the previous snapshot
 	Skipped      []string // paths of unsupported entries (symlinks, devices, …) not backed up
+	Unchanged    bool     // SnapshotIfChanged found nothing new and kept the latest snapshot
 }
 
 // Snapshot captures the repository's tracked folder. With replace set, it
 // supersedes the previous latest snapshot (chaining past it) and prunes objects
 // only that snapshot held. priv is the owner's signing key.
 func (r *Repo) Snapshot(priv ed25519.PrivateKey, replace bool) (*Snapshot, *SnapshotStats, error) {
+	return r.snapshot(priv, replace, false)
+}
+
+// SnapshotIfChanged takes a snapshot only if the folder differs from the latest
+// one; otherwise it returns the latest snapshot with stats.Unchanged set. It is
+// what scheduled backups use, so an idle folder doesn't pile up identical
+// snapshots.
+func (r *Repo) SnapshotIfChanged(priv ed25519.PrivateKey) (*Snapshot, *SnapshotStats, error) {
+	return r.snapshot(priv, false, true)
+}
+
+func (r *Repo) snapshot(priv ed25519.PrivateKey, replace, skipUnchanged bool) (*Snapshot, *SnapshotStats, error) {
 	info, err := os.Stat(r.Folder)
 	if err != nil {
 		return nil, nil, fmt.Errorf("stat %s: %w", r.Folder, err)
@@ -43,6 +56,9 @@ func (r *Repo) Snapshot(priv ed25519.PrivateKey, replace bool) (*Snapshot, *Snap
 	root, err := r.buildRoot(b, r.Folder, info, &skipped)
 	if err != nil {
 		return nil, nil, err
+	}
+	if skipUnchanged && prev != nil && prev.Root.Equal(root) {
+		return prev, &SnapshotStats{TotalObjects: len(before), Skipped: skipped, Unchanged: true}, nil
 	}
 
 	// Normally chain to the previous snapshot; when replacing, chain past it so

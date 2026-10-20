@@ -293,3 +293,23 @@ func TestAdoptRebuildsRepository(t *testing.T) {
 		t.Fatalf("snapshot after adopt stored %d new objects (%v), want 0", stats.NewObjects, err)
 	}
 }
+
+func TestSnapshotIfChanged(t *testing.T) {
+	r, priv, folder := newRepo(t)
+	first, stats, err := r.SnapshotIfChanged(priv)
+	if err != nil || stats.Unchanged {
+		t.Fatalf("first snapshot: %+v, %v", stats, err)
+	}
+	same, stats, err := r.SnapshotIfChanged(priv)
+	if err != nil || !stats.Unchanged || same.ID != first.ID {
+		t.Fatalf("unchanged folder: %+v, %v", stats, err)
+	}
+	writeFile(t, filepath.Join(folder, "a.txt"), "alpha 2")
+	next, stats, err := r.SnapshotIfChanged(priv)
+	if err != nil || stats.Unchanged || next.Parent != first.ID {
+		t.Fatalf("changed folder: %+v, %v", stats, err)
+	}
+	if snaps, _ := r.ListSnapshots(); len(snaps) != 2 {
+		t.Fatalf("%d snapshots, want 2", len(snaps))
+	}
+}
