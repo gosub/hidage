@@ -9,6 +9,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 
+	"hidage/internal/hosting"
 	"hidage/internal/identity"
 	"hidage/internal/store"
 )
@@ -50,10 +51,10 @@ func TestRelayedFriend(t *testing.T) {
 	isFriend := func(p peer.ID) bool { return friends[p] }
 
 	relay = newNodeOpts(t, nil, WithReachability(ReachabilityPublic), WithRelayService(isFriend), WithInboundFilter(isFriend))
-	sink, _ := store.NewKeyedStore(t.TempDir())
-	hidden = newNodeOpts(t, sink, WithReachability(ReachabilityPrivate), WithInboundFilter(isFriend),
+	hidden = newNodeOpts(t, nil, WithReachability(ReachabilityPrivate), WithInboundFilter(isFriend),
 		WithRelayCandidates(func() []peer.AddrInfo { return []peer.AddrInfo{addrInfo(t, relay)} }))
-	hidden.EnablePush(sink, nil, nil)
+	hosted, _ := hosting.Open(t.TempDir())
+	hidden.EnableHosting(hosted, func(string) int64 { return 1 << 20 }, nil)
 	owner = newNodeOpts(t, nil)
 	friends[relay.ID()], friends[hidden.ID()], friends[owner.ID()] = true, true, true
 
@@ -79,8 +80,8 @@ func TestRelayedFriend(t *testing.T) {
 		t.Fatalf("expected a relayed connection, got %v", conns)
 	}
 	objs := map[string][]byte{store.ID([]byte("relayed")): []byte("relayed")}
-	if n, err := owner.PushObjects(ctx, hidden.ID(), objs); err != nil || n != 1 {
-		t.Fatalf("push over relay: %d, %v", n, err)
+	if res, err := owner.PushSet(ctx, hidden.ID(), "0123456789abcdef0123456789abcdef", objs); err != nil || res.Sent != 1 {
+		t.Fatalf("push over relay: %+v, %v", res, err)
 	}
 	for id := range objs {
 		if got, err := owner.FetchObject(ctx, hidden.ID(), id); err != nil || string(got) != "relayed" {

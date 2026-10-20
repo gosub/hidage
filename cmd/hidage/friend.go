@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/multiformats/go-multiaddr"
@@ -213,7 +212,8 @@ func friendAddCmd() *cobra.Command {
 }
 
 func friendRmCmd() *cobra.Command {
-	return &cobra.Command{
+	var purge bool
+	cmd := &cobra.Command{
 		Use:   "rm <friend>",
 		Short: "Remove a friend (they can no longer connect or push to you)",
 		Args:  cobra.ExactArgs(1),
@@ -230,9 +230,27 @@ func friendRmCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("Removed %s (%s).\n", f.Nickname, f.Short())
+			hosted, err := hostedStore()
+			if err != nil {
+				return err
+			}
+			live, trash, _ := hosted.Usage(f.PubKey)
+			switch {
+			case purge:
+				if err := hosted.Purge(f.PubKey); err != nil {
+					return err
+				}
+				fmt.Printf("Deleted the %s you held for them.\n", config.FormatSize(live+trash))
+			case live+trash > 0:
+				settings, _ := config.Load()
+				fmt.Printf("The %s you hold for them is deleted when it expires (%d days unrenewed),\n"+
+					"or now with `hidage friend rm --purge`.\n", config.FormatSize(live+trash), settings.Hosting.LeaseDays)
+			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&purge, "purge", false, "also delete the data you hold for them right away")
+	return cmd
 }
 
 func friendSetCmd() *cobra.Command {
@@ -283,9 +301,10 @@ func friendSetCmd() *cobra.Command {
 }
 
 func friendLsCmd() *cobra.Command {
-	return &cobra.Command{
+	var verbose bool
+	cmd := &cobra.Command{
 		Use:   "ls",
-		Short: "List your friends",
+		Short: "List your friends: space given and used both ways, audits, reachability",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			book, err := loadFriends()
@@ -298,19 +317,41 @@ func friendLsCmd() *cobra.Command {
 				fmt.Println(" and give them yours from `hidage id --card`)")
 				return nil
 			}
-			fmt.Printf("%-16s  %-12s  %8s  %-12s  %s\n", "NAME", "KEY", "GIVE", "LAST SEEN", "ADDRESSES")
+			hosted, err := hostedStore()
+			if err != nil {
+				return err
+			}
+			fmt.Printf("%-16s  %-17s  %-17s  %-24s  %s\n", "NAME", "THEY USE HERE", "YOU USE THERE", "LAST AUDIT", "LAST SEEN")
 			for _, f := range list {
+				live, _, _ := hosted.Usage(f.PubKey)
+				here := config.FormatSize(live) + "/" + config.FormatSize(f.Give)
+				there := "-"
+				if f.QuotaThere > 0 {
+					there = config.FormatSize(f.StoredThere) + "/" + config.FormatSize(f.QuotaThere)
+				}
+				audit := "never"
+				if a := f.LastAudit; a != nil {
+					verdict := "ok"
+					if !a.OK() {
+						verdict = fmt.Sprintf("FAIL %d/%d", a.Passed, a.Sampled)
+					}
+					audit = verdict + ", " + humanAge(time.Since(a.At)) + " ago"
+				}
 				seen := "never"
 				if !f.LastSeen.IsZero() {
 					seen = humanAge(time.Since(f.LastSeen)) + " ago"
 				}
-				addrs := "(none)"
-				if len(f.Addrs) > 0 {
-					addrs = strings.Join(f.Addrs, " ")
+				fmt.Printf("%-16s  %-17s  %-17s  %-24s  %s\n", f.Nickname, here, there, audit, seen)
+				if verbose {
+					fmt.Printf("    key %s\n", f.PubKey)
+					for _, a := range f.Addrs {
+						fmt.Printf("    %s\n", a)
+					}
 				}
-				fmt.Printf("%-16s  %-12s  %8s  %-12s  %s\n", f.Nickname, f.Short(), config.FormatSize(f.Give), seen, addrs)
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "also show keys and addresses")
+	return cmd
 }

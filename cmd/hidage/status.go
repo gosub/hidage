@@ -7,7 +7,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"hidage/internal/config"
-	"hidage/internal/reputation"
 )
 
 // newStatusCmd reports, for the current repository, whether its data is
@@ -59,6 +58,17 @@ func newStatusCmd() *cobra.Command {
 			default:
 				warn("latest snapshot is NOT published — publish %s is stale (run `hidage publish`)", short(dist.SnapshotID))
 			}
+			// Friends drop a backup that isn't renewed within their lease; assume
+			// theirs matches ours.
+			settings, _ := config.Load()
+			lease := time.Duration(settings.Hosting.LeaseDays) * 24 * time.Hour
+			if left := lease - time.Since(dist.PublishedAt); left < 14*24*time.Hour {
+				if left <= 0 {
+					warn("last publish was %s ago: friends may have dropped this backup (run `hidage publish`)", humanAge(time.Since(dist.PublishedAt)))
+				} else {
+					warn("friends drop this backup in about %s unless it is re-published (run `hidage publish`)", humanAge(left))
+				}
+			}
 
 			// Fault tolerance: how many peers can be lost and still reconstruct.
 			nPeers := len(dist.Peers)
@@ -67,22 +77,30 @@ func newStatusCmd() *cobra.Command {
 				return exitCode(degraded)
 			}
 
-			rep, err := reputation.Load(mustConfig().ReputationPath)
+			book, err := loadFriends()
 			if err != nil {
 				return err
 			}
-			tolerate, failing := assessPeers(dist, rep)
-			fmt.Printf("  peers:         %d holding shards (%.1fx redundancy)\n", nPeers, dist.Redundancy)
+			isFailing := func(pubHex string) bool {
+				f, ok := book.Get(pubHex)
+				return ok && f.LastAudit != nil && !f.LastAudit.OK()
+			}
+			tolerate, failing := assessPeers(dist, isFailing)
+			fmt.Printf("  friends:       %d holding shards (%.1fx redundancy)\n", nPeers, dist.Redundancy)
 			for pubHex := range dist.Peers {
-				score, samples := rep.Evidence(pubHex)
-				state := "unproven"
-				switch {
-				case rep.Bad(pubHex):
-					state = "FAILING"
-				case rep.Good(pubHex):
-					state = "good"
+				name, state := short(pubHex), "not a friend any more"
+				if f, ok := book.Get(pubHex); ok {
+					name = f.Nickname
+					switch a := f.LastAudit; {
+					case a == nil:
+						state = "not audited yet (run `hidage audit`)"
+					case a.OK():
+						state = fmt.Sprintf("good (audited %s ago)", humanAge(time.Since(a.At)))
+					default:
+						state = fmt.Sprintf("FAILING: %d/%d shards proven %s ago", a.Passed, a.Sampled, humanAge(time.Since(a.At)))
+					}
 				}
-				fmt.Printf("    %s  %-8s score %.2f (%.1f audits)\n", short(pubHex), state, score, samples)
+				fmt.Printf("    %-16s %s\n", name, state)
 			}
 
 			if tolerate == 0 {
@@ -100,22 +118,16 @@ func newStatusCmd() *cobra.Command {
 	}
 }
 
-// peerRep is the slice of a reputation store status needs: satisfied by
-// *reputation.Store, and by a fake in tests.
-type peerRep interface {
-	Bad(pubHex string) bool
-}
-
 // assessPeers computes, for a published distribution, how many peers can be lost
 // while still reconstructing (tolerate) and how many are currently failing audits
 // (failing). When failing exceeds tolerate the backup may be unrecoverable.
-func assessPeers(dist distribution, rep peerRep) (tolerate, failing int) {
+func assessPeers(dist distribution, isFailing func(pubHex string) bool) (tolerate, failing int) {
 	nPeers := len(dist.Peers)
 	if dist.Redundancy > 0 {
 		tolerate = int(float64(nPeers) * (1 - 1/dist.Redundancy))
 	}
 	for pubHex := range dist.Peers {
-		if rep.Bad(pubHex) {
+		if isFailing(pubHex) {
 			failing++
 		}
 	}
@@ -138,11 +150,6 @@ var errSilentDegraded = &degradedError{}
 type degradedError struct{}
 
 func (*degradedError) Error() string { return "" }
-
-func mustConfig() config.Paths {
-	p, _ := config.Resolve()
-	return p
-}
 
 func short(id string) string {
 	if len(id) <= 12 {

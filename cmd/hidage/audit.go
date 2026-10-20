@@ -10,46 +10,16 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/spf13/cobra"
 
-	"hidage/internal/accounting"
 	"hidage/internal/config"
 	"hidage/internal/friends"
 	"hidage/internal/p2p"
 	"hidage/internal/pack"
 	"hidage/internal/repo"
-	"hidage/internal/reputation"
 	"hidage/internal/store"
 )
 
 // auditSample is how many of a peer's shards to challenge per audit run.
 const auditSample = 4
-
-func newReputationCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "reputation",
-		Short: "Show per-peer audit reputation scores",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			paths, err := config.Ensure()
-			if err != nil {
-				return err
-			}
-			rep, err := reputation.Load(paths.ReputationPath)
-			if err != nil {
-				return err
-			}
-			entries := rep.List()
-			if len(entries) == 0 {
-				fmt.Println("(no audit history yet; run `hidage audit`)")
-				return nil
-			}
-			fmt.Printf("%-64s  %6s  %6s  %6s  %s\n", "PUBKEY", "PASS", "FAIL", "SCORE", "GOOD")
-			for _, e := range entries {
-				fmt.Printf("%-64s  %6.1f  %6.1f  %6.2f  %v\n", e.PubKey, e.Passes, e.Fails, e.Score, e.Good)
-			}
-			return nil
-		},
-	}
-}
 
 func newAuditCmd() *cobra.Command {
 	var peers []string
@@ -59,10 +29,6 @@ func newAuditCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kr, err := unlock()
-			if err != nil {
-				return err
-			}
-			paths, err := config.Ensure()
 			if err != nil {
 				return err
 			}
@@ -104,14 +70,6 @@ func newAuditCmd() *cobra.Command {
 				return fmt.Errorf("the published release can't be regenerated; re-publish before auditing")
 			}
 
-			rep, err := reputation.Load(paths.ReputationPath)
-			if err != nil {
-				return err
-			}
-			ledger, err := accounting.Load(paths.AccountingPath)
-			if err != nil {
-				return err
-			}
 
 			node, err := p2p.New(kr.Identity(), nil, nil)
 			if err != nil {
@@ -121,6 +79,10 @@ func newAuditCmd() *cobra.Command {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 
+			book, err := loadFriends()
+			if err != nil {
+				return err
+			}
 			// Whom to audit: the named peers, or every friend holding shards.
 			var targets []peer.ID
 			if len(peers) > 0 {
@@ -133,10 +95,6 @@ func newAuditCmd() *cobra.Command {
 					targets = append(targets, pid)
 				}
 			} else {
-				book, err := loadFriends()
-				if err != nil {
-					return err
-				}
 				reached := reachFriends(ctx, node, book, true)
 				for pubHex := range dist.Peers {
 					name := pubHex[:12]
@@ -154,9 +112,10 @@ func newAuditCmd() *cobra.Command {
 
 			for _, pid := range targets {
 				pubHex, _ := p2p.PeerPubKeyHex(pid)
+				name := peerName(book, peerID{id: pid, pubHex: pubHex})
 				shardIDs := dist.Peers[pubHex]
 				if len(shardIDs) == 0 {
-					fmt.Printf("  %s: no shards assigned to this peer\n", pid)
+					fmt.Printf("  %s: holds no shards of this backup\n", name)
 					continue
 				}
 				sample := sampleShards(shardIDs, auditSample)
@@ -167,16 +126,13 @@ func newAuditCmd() *cobra.Command {
 						pass++
 					}
 				}
-				ok := pass == len(sample)
-				rep.Record(pubHex, ok)
-				verdict, note := "PASS", ""
-				if !ok {
-					verdict = "FAIL"
-					note = ", storage credit revoked"
-					ledger.RevokeTheyStoreForUs(pubHex) // it dropped our data; revoke its credit
+				result := &friends.Audit{At: time.Now().UTC(), Sampled: len(sample), Passed: pass}
+				book.Update(pubHex, func(f *friends.Friend) error { f.LastAudit = result; return nil })
+				verdict := "PASS"
+				if !result.OK() {
+					verdict = "FAIL: they no longer hold all of your data; re-publish and talk to them"
 				}
-				fmt.Printf("  %s: %d/%d sampled shards verified → %s (score %.2f)%s\n",
-					pid, pass, len(sample), verdict, rep.Score(pubHex), note)
+				fmt.Printf("  %s: %d/%d sampled shards proven held → %s\n", name, pass, len(sample), verdict)
 			}
 			return nil
 		},

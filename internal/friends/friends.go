@@ -38,7 +38,24 @@ type Friend struct {
 	Give     int64     `json:"give"`            // bytes this node will store for them
 	AddedAt  time.Time `json:"addedAt"`
 	LastSeen time.Time `json:"lastSeen,omitzero"`
+
+	// What they store for us, as they last reported it on a push.
+	StoredThere int64 `json:"storedThere,omitempty"` // bytes of ours they hold
+	QuotaThere  int64 `json:"quotaThere,omitempty"`  // bytes they give us
+
+	// LastAudit is the most recent proof-of-storage check of our data on them.
+	LastAudit *Audit `json:"lastAudit,omitempty"`
 }
+
+// Audit is the outcome of challenging a friend to prove it holds our shards.
+type Audit struct {
+	At      time.Time `json:"at"`
+	Sampled int       `json:"sampled"` // shards challenged
+	Passed  int       `json:"passed"`  // shards proven held
+}
+
+// OK reports whether every challenged shard was proven held.
+func (a *Audit) OK() bool { return a != nil && a.Sampled > 0 && a.Passed == a.Sampled }
 
 // PeerID returns the friend's libp2p peer ID (derived from the public key).
 func (f *Friend) PeerID() (peer.ID, error) { return PeerIDFromHex(f.PubKey) }

@@ -20,6 +20,7 @@ import (
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 
+	"hidage/internal/hosting"
 	"hidage/internal/identity"
 )
 
@@ -29,19 +30,28 @@ type Blobs interface {
 	Has(id string) (bool, error)
 }
 
-// Sink receives objects pushed by other peers (for storage on their behalf).
-type Sink interface {
-	Put(id string, data []byte) error
-}
-
 // Node is a running libp2p host.
 type Node struct {
-	host       host.Host
-	id         identity.Identity
-	blobs      Blobs
-	sink       Sink
-	acceptPush func(senderPub []byte, cumulative int64) bool
-	onStored   func(senderPub []byte, bytes int64)
+	host   host.Host
+	id     identity.Identity
+	blobs  Blobs
+	hosted *hosting.Host // friends' data (EnableHosting); serves each requester its own
+}
+
+// lookup returns the object a requester may read: from the requester's own
+// hosted data when hosting is enabled, else from the node's blob store.
+func (n *Node) lookup(requester peer.ID, id string) ([]byte, error) {
+	if n.hosted != nil {
+		owner, err := PeerPubKeyHex(requester)
+		if err != nil {
+			return nil, err
+		}
+		return n.hosted.Get(owner, id)
+	}
+	if n.blobs == nil {
+		return nil, ErrObjectNotFound
+	}
+	return n.blobs.Get(id)
 }
 
 // New starts a libp2p host whose peer ID is derived from id (the node's Ed25519

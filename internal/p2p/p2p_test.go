@@ -3,7 +3,6 @@ package p2p
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
+	"hidage/internal/hosting"
 	"hidage/internal/identity"
 	"hidage/internal/store"
 )
@@ -121,15 +121,25 @@ func newNodeID(t *testing.T, blobs Blobs) (*Node, identity.Identity) {
 	return n, id
 }
 
-func TestPushAndFetch(t *testing.T) {
+// newHostNode returns a node hosting friends' data with the given quota for all.
+func newHostNode(t *testing.T, quota int64) (*Node, *hosting.Host) {
+	t.Helper()
+	h, err := hosting.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _ := newNodeID(t, nil)
+	n.EnableHosting(h, func(string) int64 { return quota }, nil)
+	return n, h
+}
+
+const testSet = "0123456789abcdef0123456789abcdef"
+
+func TestPushSetAndFetch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	// Storage node S: serves and accepts pushes into a sink.
-	sink, _ := store.NewKeyedStore(t.TempDir())
-	s, _ := newNodeID(t, sink)
-	s.EnablePush(sink, nil, nil) // accept from anyone
-
+	s, _ := newHostNode(t, 1<<20)
 	a, _ := newNodeID(t, nil)
 	if _, err := a.Connect(ctx, s.Addrs()[0]); err != nil {
 		t.Fatal(err)
@@ -138,14 +148,19 @@ func TestPushAndFetch(t *testing.T) {
 	for _, d := range [][]byte{[]byte("obj-one"), []byte("obj-two")} {
 		objs[store.ID(d)] = d
 	}
-	stored, err := a.PushObjects(ctx, s.ID(), objs)
+	res, err := a.PushSet(ctx, s.ID(), testSet, objs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored != len(objs) {
-		t.Fatalf("stored %d, want %d", stored, len(objs))
+	if res.Objects != 2 || res.Sent != 2 || res.Held != 14 || res.Give != 1<<20 {
+		t.Fatalf("first push = %+v", res)
 	}
-	// S now serves them back; GetObject tries the given peers in turn.
+	// Renewing an unchanged set transfers nothing.
+	if res, err := a.PushSet(ctx, s.ID(), testSet, objs); err != nil || res.Sent != 0 || res.Held != 14 {
+		t.Fatalf("renewal = %+v, %v", res, err)
+	}
+
+	// S serves them back to A; GetObject tries the given peers in turn.
 	other, _ := newNodeID(t, nil)
 	a.Connect(ctx, other.Addrs()[0])
 	for id, want := range objs {
@@ -156,6 +171,73 @@ func TestPushAndFetch(t *testing.T) {
 	}
 	if _, err := a.GetObject(ctx, store.ID([]byte("nope")), []peer.ID{s.ID()}); !errors.Is(err, ErrObjectNotFound) {
 		t.Fatalf("missing object: err = %v", err)
+	}
+	// Another friend of S cannot read A's data.
+	other.Connect(ctx, s.Addrs()[0])
+	for id := range objs {
+		if _, err := other.FetchObject(ctx, s.ID(), id); err == nil {
+			t.Fatal("a different peer fetched A's hosted object")
+		}
+	}
+}
+
+func TestPushRefusedForNonFriend(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	s, _ := newHostNode(t, 0) // quota 0: not a friend
+	a, _ := newNodeID(t, nil)
+	if _, err := a.Connect(ctx, s.Addrs()[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.PushSet(ctx, s.ID(), testSet, map[string][]byte{store.ID([]byte("x")): []byte("x")}); !errors.Is(err, ErrNotFriend) {
+		t.Fatalf("err = %v, want ErrNotFriend", err)
+	}
+}
+
+func TestPushQuota(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	s, h := newHostNode(t, 20)
+	a, _ := newNodeID(t, nil)
+	if _, err := a.Connect(ctx, s.Addrs()[0]); err != nil {
+		t.Fatal(err)
+	}
+	set := func(words ...string) map[string][]byte {
+		m := map[string][]byte{}
+		for _, w := range words {
+			m[store.ID([]byte(w))] = []byte(w)
+		}
+		return m
+	}
+	if _, err := a.PushSet(ctx, s.ID(), testSet, set("aaaaaaaa", "bbbbbbbb")); err != nil {
+		t.Fatal(err)
+	}
+	// Adding a third 8-byte object would hold 24 > 20 bytes.
+	var qe *QuotaError
+	if _, err := a.PushSet(ctx, s.ID(), testSet, set("aaaaaaaa", "bbbbbbbb", "cccccccc")); !errors.As(err, &qe) || qe.Need != 24 || qe.Give != 20 {
+		t.Fatalf("err = %v, want QuotaError{24, 20}", err)
+	}
+	// Replacing an object frees its space: renewal never double-counts.
+	for i := 0; i < 3; i++ {
+		if _, err := a.PushSet(ctx, s.ID(), testSet, set("aaaaaaaa", "cccccccc")); err != nil {
+			t.Fatalf("replacement %d refused: %v", i, err)
+		}
+	}
+	aHex, _ := PeerPubKeyHex(a.ID())
+	if live, trash, _ := h.Usage(aHex); live != 16 || trash != 8 {
+		t.Fatalf("usage = %d live, %d trash", live, trash)
+	}
+}
+
+func TestOversizedObjectRejected(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	s, _ := newHostNode(t, 1<<40)
+	a, _ := newNodeID(t, nil)
+	a.Connect(ctx, s.Addrs()[0])
+	big := make([]byte, MaxObjectSize+1)
+	if _, err := a.PushSet(ctx, s.ID(), testSet, map[string][]byte{store.ID(big): big}); err == nil {
+		t.Fatal("expected an object larger than MaxObjectSize to be rejected")
 	}
 }
 
@@ -259,70 +341,6 @@ func TestAddrRecords(t *testing.T) {
 	if r, err := a.FetchAddrRecord(ctx, b.ID(), strings.Repeat("ab", 32)); err != nil || r != nil {
 		t.Fatalf("unknown subject: %+v, %v", r, err)
 	}
-}
-
-func TestPushRefusedWhenBlocked(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	sink, _ := store.NewKeyedStore(t.TempDir())
-	s, _ := newNodeID(t, sink)
-	s.EnablePush(sink, func(pub []byte, cumulative int64) bool { return false }, nil) // refuse everyone
-
-	emptyA, _ := store.NewFSStore(t.TempDir())
-	a, _ := newNodeID(t, emptyA)
-	if _, err := a.Connect(ctx, s.Addrs()[0]); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := a.PushObjects(ctx, s.ID(), map[string][]byte{store.ID([]byte("x")): []byte("x")}); err == nil {
-		t.Fatal("expected push to be refused")
-	}
-}
-
-func TestPushBudgetEnforcedWithinStream(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-
-	// Accept up to 10 cumulative bytes in the stream, then stop.
-	sink, _ := store.NewKeyedStore(t.TempDir())
-	s, _ := newNodeID(t, sink)
-	s.EnablePush(sink, func(pub []byte, cumulative int64) bool { return cumulative <= 10 }, nil)
-
-	emptyA, _ := store.NewFSStore(t.TempDir())
-	a, _ := newNodeID(t, emptyA)
-	if _, err := a.Connect(ctx, s.Addrs()[0]); err != nil {
-		t.Fatal(err)
-	}
-
-	// Three 8-byte objects: the first fits (8 ≤ 10), the second would reach 16
-	// and must be rejected, ending the stream — so exactly one is stored.
-	objs := map[string][]byte{}
-	for _, w := range []string{"aaaaaaaa", "bbbbbbbb", "cccccccc"} {
-		objs[store.ID([]byte(w))] = []byte(w)
-	}
-	stored, err := a.PushObjects(ctx, s.ID(), objs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored != 1 {
-		t.Fatalf("stored %d objects, want 1 (budget should have stopped the stream)", stored)
-	}
-}
-
-func TestOversizedObjectRejected(t *testing.T) {
-	if _, _, err := readObject(oversizedObjectFrame()); err == nil {
-		t.Fatal("expected readObject to reject an object larger than MaxObjectSize")
-	}
-}
-
-// oversizedObjectFrame builds a push frame declaring a data length above the cap.
-func oversizedObjectFrame() *bytes.Reader {
-	var buf bytes.Buffer
-	id := "deadbeef"
-	binary.Write(&buf, binary.BigEndian, uint32(len(id)))
-	buf.WriteString(id)
-	binary.Write(&buf, binary.BigEndian, uint64(MaxObjectSize+1))
-	return bytes.NewReader(buf.Bytes())
 }
 
 func TestAuditProofOfStorage(t *testing.T) {

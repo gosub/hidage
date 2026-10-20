@@ -38,10 +38,6 @@ type Paths struct {
 	TrustPath string
 	// FriendsPath is the node's friend list (address book).
 	FriendsPath string
-	// ReputationPath is the node's per-peer audit history.
-	ReputationPath string
-	// AccountingPath is the node's per-peer space ledger.
-	AccountingPath string
 }
 
 // Resolve computes the config paths without creating anything on disk.
@@ -56,13 +52,11 @@ func Resolve() (Paths, error) {
 	}
 	dir := filepath.Join(base, AppName)
 	return Paths{
-		Dir:            dir,
-		ConfigPath:     filepath.Join(dir, "config.toml"),
-		KeyringPath:    filepath.Join(dir, "keyring.json"),
-		TrustPath:      filepath.Join(dir, "trust.json"),
-		FriendsPath:    filepath.Join(dir, "friends.json"),
-		ReputationPath: filepath.Join(dir, "reputation.json"),
-		AccountingPath: filepath.Join(dir, "accounting.json"),
+		Dir:         dir,
+		ConfigPath:  filepath.Join(dir, "config.toml"),
+		KeyringPath: filepath.Join(dir, "keyring.json"),
+		TrustPath:   filepath.Join(dir, "trust.json"),
+		FriendsPath: filepath.Join(dir, "friends.json"),
 	}, nil
 }
 
@@ -97,8 +91,11 @@ type Settings struct {
 type Hosting struct {
 	// DefaultGive is the quota granted to a newly added friend.
 	DefaultGive Size `toml:"default_give"`
-	// LeaseDays is how long a friend's data is kept without being renewed.
+	// LeaseDays is how long a friend's backup is kept without being renewed.
 	LeaseDays int `toml:"lease_days"`
+	// TrashDays is how long data a friend replaced or dropped is kept before
+	// it is deleted (a guard against a compromised friend machine wiping it).
+	TrashDays int `toml:"trash_days"`
 }
 
 // Backup configures how this node publishes its own backups.
@@ -119,7 +116,7 @@ func Defaults() Settings {
 			"/ip6/::/tcp/4001", "/ip6/::/udp/4001/quic-v1",
 		},
 		Reachability: "auto",
-		Hosting:      Hosting{DefaultGive: 100 << 30, LeaseDays: 90},
+		Hosting:      Hosting{DefaultGive: 100 << 30, LeaseDays: 90, TrashDays: 30},
 		Backup:       Backup{Redundancy: 2.0, MinFriends: 1},
 	}
 }
@@ -199,7 +196,7 @@ func WriteTemplate(p Paths) (bool, error) {
 		listen[i] = fmt.Sprintf("%q", l)
 	}
 	body := fmt.Sprintf(template, d.Name, DataStoreDir(), strings.Join(listen, ", "), d.Reachability,
-		FormatSize(int64(d.Hosting.DefaultGive)), d.Hosting.LeaseDays,
+		FormatSize(int64(d.Hosting.DefaultGive)), d.Hosting.LeaseDays, d.Hosting.TrashDays,
 		d.Backup.Redundancy, d.Backup.MinFriends)
 	if err := os.WriteFile(p.ConfigPath, []byte(body), 0o600); err != nil {
 		return false, fmt.Errorf("write %s: %w", p.ConfigPath, err)
@@ -227,8 +224,11 @@ reachability = %q
 [hosting]
 # Space granted to a newly added friend (change per friend with "hidage friend set").
 default_give = %q
-# A friend's data not renewed for this many days is reclaimed.
+# A friend's backup not renewed for this many days is dropped.
 lease_days = %d
+# Data a friend replaced or dropped is kept this many days before deletion, so a
+# compromised friend machine can't wipe its backups at once.
+trash_days = %d
 
 [backup]
 # Shards emitted per shard needed: 2.0 survives losing half of them.

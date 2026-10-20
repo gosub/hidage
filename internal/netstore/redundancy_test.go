@@ -13,6 +13,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"hidage/internal/dag"
+	"hidage/internal/hosting"
 	"hidage/internal/identity"
 	"hidage/internal/keyring"
 	"hidage/internal/netstore"
@@ -58,13 +59,13 @@ func TestRedundantRecoverySurvivesPeerLoss(t *testing.T) {
 	// Three friends' storage nodes.
 	storNodes := make([]*p2p.Node, 3)
 	for i := range storNodes {
-		sink, _ := store.NewKeyedStore(t.TempDir())
 		id, _ := identity.Generate()
-		n, err := p2p.New(id, sink, []string{"/ip4/127.0.0.1/tcp/0"})
+		n, err := p2p.New(id, nil, []string{"/ip4/127.0.0.1/tcp/0"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		n.EnablePush(sink, nil, nil)
+		hosted, _ := hosting.Open(t.TempDir())
+		n.EnableHosting(hosted, func(string) int64 { return 1 << 30 }, nil)
 		heads, _ := store.NewKeyedStore(t.TempDir())
 		n.EnableHeadStore(heads.Put, heads.Get)
 		storNodes[i] = n
@@ -92,7 +93,7 @@ func TestRedundantRecoverySurvivesPeerLoss(t *testing.T) {
 		j++
 	}
 	for i, n := range storNodes {
-		if _, err := owner.PushObjects(ctx, n.ID(), assign[i]); err != nil {
+		if _, err := owner.PushSet(ctx, n.ID(), testSet, assign[i]); err != nil {
 			t.Fatalf("push to peer %d: %v", i, err)
 		}
 	}

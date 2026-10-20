@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -16,10 +19,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"hidage/internal/account"
-	"hidage/internal/accounting"
 	"hidage/internal/config"
 	"hidage/internal/dag"
 	"hidage/internal/friends"
+	"hidage/internal/hosting"
 	"hidage/internal/netstore"
 	"hidage/internal/p2p"
 	"hidage/internal/pack"
@@ -27,9 +30,9 @@ import (
 	"hidage/internal/store"
 )
 
-// publishedStore is the node-wide store of objects this node serves to the network.
-func publishedStore() (*store.KeyedStore, error) {
-	return store.NewKeyedStore(filepath.Join(config.DataStoreDir(), "published"))
+// hostedStore is where this node keeps its friends' data.
+func hostedStore() (*hosting.Host, error) {
+	return hosting.Open(filepath.Join(config.DataStoreDir(), "hosted"))
 }
 
 // headsStore holds the signed head records friends handed this node, keyed by
@@ -40,19 +43,12 @@ func headsStore() (*store.KeyedStore, error) {
 
 func newServeCmd() *cobra.Command {
 	var listen []string
-	var ratio float64
-	var freeMiB int64
-	var leaseHours int
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run a node: host and serve friends' data, relay for them, keep in touch",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kr, err := unlock()
-			if err != nil {
-				return err
-			}
-			paths, err := config.Ensure()
 			if err != nil {
 				return err
 			}
@@ -64,10 +60,7 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if !cmd.Flags().Changed("lease") {
-				leaseHours = settings.Hosting.LeaseDays * 24
-			}
-			pub, err := publishedStore()
+			hosted, err := hostedStore()
 			if err != nil {
 				return err
 			}
@@ -86,7 +79,7 @@ func newServeCmd() *cobra.Command {
 				// gets relay reservations in place even in a two-friend group.
 				reach = p2p.ReachabilityPrivate
 			}
-			node, err := p2p.New(kr.Identity(), pub, listen,
+			node, err := p2p.New(kr.Identity(), nil, listen,
 				p2p.WithInboundFilter(isFriend), // friends only: refuse anyone else
 				p2p.WithRelayService(isFriend),  // relay for friends while reachable
 				p2p.WithRelayCandidates(func() []peer.AddrInfo { return friendAddrInfos(book) }),
@@ -97,33 +90,26 @@ func newServeCmd() *cobra.Command {
 			defer node.Close()
 
 			ctx := context.Background()
-			ledger, err := accounting.Load(paths.AccountingPath)
-			if err != nil {
-				return err
-			}
 			heads, err := headsStore()
 			if err != nil {
 				return err
 			}
 			node.EnableHeadStore(heads.Put, heads.Get) // owner-signed; returned to the owner on recovery
 			node.EnableAddrService(func(subject string) *p2p.AddrRecord { return storedAddrRecord(book, subject) })
-			free := freeMiB << 20
-			node.EnablePush(pub,
-				func(senderPub []byte, cumulative int64) bool {
-					if !book.IsFriend(hex.EncodeToString(senderPub)) {
-						return false // friends only
+			node.EnableHosting(hosted,
+				func(ownerHex string) int64 {
+					f, ok := book.Get(ownerHex)
+					if !ok {
+						return 0 // friends only
 					}
-					// cumulative is what this stream would have stored so far; the
-					// ledger checks it stays within ratio×reciprocation + free.
-					return ledger.Allow(hex.EncodeToString(senderPub), cumulative, ratio, free)
+					return f.Give
 				},
-				func(senderPub []byte, b int64) {
-					pubHex := hex.EncodeToString(senderPub)
-					ledger.AddStoredForThem(pubHex, b)
-					book.Update(pubHex, func(f *friends.Friend) error { f.LastSeen = time.Now().UTC(); return nil })
+				func(ownerHex string, held int64) {
+					book.Update(ownerHex, func(f *friends.Friend) error { f.LastSeen = time.Now().UTC(); return nil })
 				})
 			go keepInTouchLoop(ctx, node, book)
-			go gcLoop(ctx, pub, time.Duration(leaseHours)*time.Hour)
+			go reapLoop(ctx, hosted, time.Duration(settings.Hosting.LeaseDays)*24*time.Hour,
+				time.Duration(settings.Hosting.TrashDays)*24*time.Hour)
 
 			if err := writeNodeState(node.ListenAddrs()); err != nil {
 				return err
@@ -141,9 +127,6 @@ func newServeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringArrayVar(&listen, "listen", nil, "listen multiaddr(s) (default: `listen` in config.toml)")
-	cmd.Flags().Float64Var(&ratio, "ratio", accounting.DefaultRatio, "max bytes stored per peer per byte they store for us")
-	cmd.Flags().Int64Var(&freeMiB, "free", accounting.DefaultFreeQuota>>20, "free quota per peer, in MiB (no reciprocation required)")
-	cmd.Flags().IntVar(&leaseHours, "lease", 0, "hosted-shard lease in hours; data not renewed within this is reclaimed (default: hosting.lease_days)")
 	return cmd
 }
 
@@ -181,27 +164,18 @@ func keepInTouchLoop(ctx context.Context, node *p2p.Node, book *friends.Book) {
 	}
 }
 
-// gcLoop periodically reclaims hosted objects whose storage lease has lapsed
-// (they were not renewed by a re-publish within the lease window).
-func gcLoop(ctx context.Context, blobs *store.KeyedStore, lease time.Duration) {
-	reap := func() {
-		if n, err := blobs.Reap(lease); err == nil && n > 0 {
-			fmt.Printf("[gc] reclaimed %d expired hosted objects\n", n)
-		}
-	}
-	reap()
-	interval := lease / 12
-	if interval < time.Minute {
-		interval = time.Minute
-	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
+// reapLoop periodically drops friends' sets not renewed within the lease and
+// deletes trash older than the grace period.
+func reapLoop(ctx context.Context, h *hosting.Host, lease, trashAge time.Duration) {
 	for {
+		if st, err := h.Reap(lease, trashAge); err == nil && st.ExpiredSets+st.DeletedTrash > 0 {
+			fmt.Printf("[hosting] %d expired backup set(s); deleted %d old trashed object(s) (%s)\n",
+				st.ExpiredSets, st.DeletedTrash, config.FormatSize(st.FreedBytes))
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
-			reap()
+		case <-time.After(time.Hour):
 		}
 	}
 }
@@ -326,15 +300,6 @@ func newPublishCmd() *cobra.Command {
 				return err
 			}
 			manifestID := store.ID(manifestBytes)
-			paths, err := config.Ensure()
-			if err != nil {
-				return err
-			}
-			ledger, err := accounting.Load(paths.AccountingPath)
-			if err != nil {
-				return err
-			}
-
 			// Erasure coding only helps if shards land on enough distinct peers.
 			tolerate := int(float64(len(accepted)) * (1 - 1/redundancy))
 			if tolerate == 0 {
@@ -348,30 +313,37 @@ func newPublishCmd() *cobra.Command {
 			common := map[string][]byte{relID: relBytes, manifestID: manifestBytes}
 			assignments := spreadShards(shardBlobs, common, len(accepted))
 			dist := distribution{ReleaseID: relID, SnapshotID: snap.ID, Redundancy: redundancy, PublishedAt: time.Now().UTC(), Peers: map[string][]string{}}
+			setID := hostedSetID(kr.MasterKey(), r.RepoID())
 			var holders []peerID
 			for i, p := range accepted {
 				push := assignments[i]
-				var bytes int64
 				var shardIDs []string
-				for id, d := range push {
-					bytes += int64(len(d))
+				for id := range push {
 					if _, isShard := shardBlobs[id]; isShard {
 						shardIDs = append(shardIDs, id)
 					}
 				}
-				stored, err := node.PushObjects(ctx, p.id, push)
-				if err != nil {
-					fmt.Printf("  %s: %v\n", p.id, err)
+				name := peerName(book, p)
+				res, err := node.PushSet(ctx, p.id, setID, push)
+				var qe *p2p.QuotaError
+				switch {
+				case errors.As(err, &qe):
+					fmt.Printf("  %s: not enough space: this backup needs %s there, they give you %s\n",
+						name, config.FormatSize(qe.Need), config.FormatSize(qe.Give))
+					continue
+				case err != nil:
+					fmt.Printf("  %s: %v\n", name, err)
 					continue
 				}
-				if stored < len(push) {
-					fmt.Printf("  %s: stored only %d of %d objects (out of space?)\n", p.id, stored, len(push))
-					continue
-				}
-				ledger.AddTheyStoreForUs(p.pubHex, bytes)
 				dist.Peers[p.pubHex] = shardIDs // remember what to audit them for
 				holders = append(holders, p)
-				fmt.Printf("  %s: stored %d shards (%d bytes)\n", p.id, stored, bytes)
+				book.Update(p.pubHex, func(f *friends.Friend) error {
+					f.StoredThere, f.QuotaThere = res.Held, res.Give
+					return nil
+				})
+				fmt.Printf("  %s: %d shards, sent %d new (%s); you use %s of %s there\n",
+					name, len(shardIDs), res.Sent, config.FormatSize(res.SentBytes),
+					config.FormatSize(res.Held), config.FormatSize(res.Give))
 			}
 			// Shards assigned to a peer that didn't store them are missing; the
 			// release is only rebuildable if no more peers failed than it tolerates.
@@ -415,6 +387,22 @@ func newPublishCmd() *cobra.Command {
 type peerID struct {
 	id     peer.ID
 	pubHex string
+}
+
+// peerName is a friend's nickname, or a short peer ID for others.
+func peerName(book *friends.Book, p peerID) string {
+	if f, ok := book.Get(p.pubHex); ok {
+		return f.Nickname
+	}
+	return p.id.String()[:16]
+}
+
+// hostedSetID names a repository's set on friends' nodes. It is derived from the
+// repo id under the master key, so hosts can't link it to the repo.
+func hostedSetID(masterKey []byte, repoID string) string {
+	m := hmac.New(sha256.New, masterKey)
+	m.Write([]byte("hidage/hosted-set/v1\n" + repoID))
+	return hex.EncodeToString(m.Sum(nil))[:32]
 }
 
 // distribution records which shards of the latest release went to which peer, so

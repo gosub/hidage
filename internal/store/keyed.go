@@ -6,15 +6,14 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 // KeyedStore is a blob store addressed by an externally-supplied id rather than
-// by the hash of its contents. It backs a node's set of published/served network
-// objects, where ids are a mix of chunk/node content addresses and snapshot ids
-// (whose id is a hash of the signed payload, not of the stored bytes). Callers
-// verify integrity on read (content addresses by re-hashing, snapshots by
-// signature), so the store itself need not be content-addressed.
+// by the hash of its contents. It backs the restore cache and the head records a
+// node keeps for friends, where ids are a mix of content addresses, snapshot ids
+// (a hash of the signed payload, not of the stored bytes) and owner keys. Callers
+// verify integrity on read (content addresses by re-hashing, snapshots and heads
+// by signature), so the store itself need not be content-addressed.
 type KeyedStore struct {
 	root string
 }
@@ -65,34 +64,6 @@ func (s *KeyedStore) Has(id string) (bool, error) {
 		return false, nil
 	}
 	return false, err
-}
-
-// Reap deletes objects whose last-modified time is older than maxAge, returning
-// the count removed. This implements storage leases for hosted data: a push
-// rewrites (and so renews) an object's mtime, so data an owner stops renewing
-// eventually expires and is reclaimed.
-func (s *KeyedStore) Reap(maxAge time.Duration) (int, error) {
-	cutoff := time.Now().Add(-maxAge)
-	deleted := 0
-	err := filepath.WalkDir(s.root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil // racing deletion; skip
-		}
-		if info.ModTime().Before(cutoff) {
-			if err := os.Remove(p); err == nil {
-				deleted++
-			}
-		}
-		return nil
-	})
-	return deleted, err
 }
 
 // List returns all stored ids.

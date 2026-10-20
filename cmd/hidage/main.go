@@ -44,9 +44,7 @@ func main() {
 		newPublishCmd(),
 		newNetRestoreCmd(),
 		newNetListCmd(),
-		newReputationCmd(),
 		newAuditCmd(),
-		newAccountingCmd(),
 	)
 	if err := root.Execute(); err != nil {
 		// A degraded-backup status is a non-zero exit, not an error to print.

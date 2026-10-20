@@ -6,7 +6,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -67,12 +66,7 @@ func (n *Node) registerAuditHandler() {
 			return
 		}
 
-		var data []byte
-		if n.blobs != nil {
-			data, err = n.blobs.Get(id)
-		} else {
-			err = errors.New("no blobs")
-		}
+		data, err := n.lookup(s.Conn().RemotePeer(), id)
 		if err != nil {
 			s.Write([]byte{0})
 			return

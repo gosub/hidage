@@ -12,6 +12,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"hidage/internal/dag"
+	"hidage/internal/hosting"
 	"hidage/internal/identity"
 	"hidage/internal/keyring"
 	"hidage/internal/netstore"
@@ -19,6 +20,8 @@ import (
 	"hidage/internal/repo"
 	"hidage/internal/store"
 )
+
+const testSet = "0123456789abcdef0123456789abcdef"
 
 func writeFile(t *testing.T, path string, data []byte) {
 	t.Helper()
@@ -67,14 +70,14 @@ func TestEndToEndCrossNodeRecovery(t *testing.T) {
 	}
 
 	// Storage peer S: accepts pushes and serves them.
-	sink, _ := store.NewKeyedStore(t.TempDir())
 	idS, _ := identity.Generate()
-	sNode, err := p2p.New(idS, sink, []string{"/ip4/127.0.0.1/tcp/0"})
+	sNode, err := p2p.New(idS, nil, []string{"/ip4/127.0.0.1/tcp/0"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sNode.Close()
-	sNode.EnablePush(sink, nil, nil)
+	hosted, _ := hosting.Open(t.TempDir())
+	sNode.EnableHosting(hosted, func(string) int64 { return 1 << 30 }, nil)
 	heads, _ := store.NewKeyedStore(t.TempDir())
 	sNode.EnableHeadStore(heads.Put, heads.Get)
 
@@ -87,12 +90,12 @@ func TestEndToEndCrossNodeRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stored, err := aNode.PushObjects(ctx, sNode.ID(), pubset)
+	res, err := aNode.PushSet(ctx, sNode.ID(), testSet, pubset)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored != len(pubset) {
-		t.Fatalf("pushed %d objects, S stored %d", len(pubset), stored)
+	if res.Sent != len(pubset) {
+		t.Fatalf("pushed %d objects, S stored %d", len(pubset), res.Sent)
 	}
 	head, _ := p2p.SignHead(idA, snap.ID)
 	if err := aNode.PushHead(ctx, sNode.ID(), head); err != nil {
