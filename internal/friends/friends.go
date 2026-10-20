@@ -51,27 +51,53 @@ type Book struct {
 	path    string
 	mu      sync.Mutex
 	friends map[string]*Friend
+	modTime time.Time // of the file as last read or written, for Refresh
 }
 
 // Load reads the friend list at path, returning an empty list if it is absent.
 func Load(path string) (*Book, error) {
 	b := &Book{path: path, friends: map[string]*Friend{}}
-	raw, err := os.ReadFile(path)
+	if err := b.readLocked(); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func (b *Book) readLocked() error {
+	info, err := os.Stat(b.path)
 	if errors.Is(err, os.ErrNotExist) {
-		return b, nil
+		return nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read friend list: %w", err)
+		return fmt.Errorf("read friend list: %w", err)
+	}
+	raw, err := os.ReadFile(b.path)
+	if err != nil {
+		return fmt.Errorf("read friend list: %w", err)
 	}
 	var f fileFormat
 	if err := json.Unmarshal(raw, &f); err != nil {
-		return nil, fmt.Errorf("parse friend list: %w", err)
+		return fmt.Errorf("parse friend list: %w", err)
 	}
+	friends := map[string]*Friend{}
 	for k, fr := range f.Friends {
 		fr.PubKey = k
-		b.friends[k] = fr
+		friends[k] = fr
 	}
-	return b, nil
+	b.friends, b.modTime = friends, info.ModTime()
+	return nil
+}
+
+// Refresh re-reads the file if another process (e.g. `hidage friend add` while
+// the daemon runs) changed it since this Book last read or wrote it.
+func (b *Book) Refresh() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	info, err := os.Stat(b.path)
+	if err != nil || info.ModTime().Equal(b.modTime) {
+		return nil
+	}
+	return b.readLocked()
 }
 
 // Exists reports whether a friend list file is present.
@@ -293,7 +319,13 @@ func (b *Book) saveLocked() error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, b.path)
+	if err := os.Rename(tmp, b.path); err != nil {
+		return err
+	}
+	if info, err := os.Stat(b.path); err == nil {
+		b.modTime = info.ModTime()
+	}
+	return nil
 }
 
 // NormalizeKey validates a hex Ed25519 public key and returns its lower-case form.

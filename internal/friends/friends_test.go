@@ -130,3 +130,17 @@ func TestImportTrust(t *testing.T) {
 		t.Fatal("import should persist the friend list")
 	}
 }
+
+func TestRefreshSeesOtherWriters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "friends.json")
+	daemon, _ := Load(path)
+	cli, _ := Load(path)
+	c := newCard(t, "carol")
+	if _, _, err := cli.Add(c, "", 1); err != nil {
+		t.Fatal(err)
+	}
+	key := hex.EncodeToString(c.PubKey)
+	if err := daemon.Refresh(); err != nil || !daemon.IsFriend(key) {
+		t.Fatalf("Refresh did not pick up the new friend (err %v)", err)
+	}
+}
