@@ -10,6 +10,8 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"hidage/internal/config"
 )
 
 func main() {
@@ -18,6 +20,10 @@ func main() {
 		Short:         "hidage — encrypted, versioned, distributed backup",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			_, err := config.Load() // surface a malformed config.toml before doing anything
+			return err
+		},
 	}
 	root.PersistentFlags().StringVarP(&chdirFlag, "chdir", "C", "",
 		"operate as if started in this directory (repository discovery walks up from here)")

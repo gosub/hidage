@@ -89,7 +89,7 @@ func openDataStore(dataDir, repoID string) (store.Store, error) {
 		return nil, fmt.Errorf("cannot use data store at %s: permission denied.\n"+
 			"Create it once, e.g.:\n"+
 			"  sudo mkdir -p %s && sudo chown \"$USER\" %s\n"+
-			"or set HIDAGE_STORE to a writable path.", dataDir, dataDir, dataDir)
+			"or set `store` in ~/.config/hidage/config.toml (or HIDAGE_STORE) to a writable path.", dataDir, dataDir, dataDir)
 	}
 	return nil, err
 }

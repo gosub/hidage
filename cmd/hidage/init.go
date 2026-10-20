@@ -19,6 +19,11 @@ func newInitCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if wrote, err := config.WriteTemplate(paths); err != nil {
+				return err
+			} else if wrote {
+				fmt.Printf("Wrote settings to %s\n", paths.ConfigPath)
+			}
 			if keyring.Exists(paths.KeyringPath) {
 				fmt.Printf("Already initialized at %s\n", paths.Dir)
 				fmt.Println("Run `hidage recovery-code` to view your recovery phrase.")
@@ -33,6 +38,7 @@ func newInitCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("Initialized hidage at %s\n", paths.Dir)
+			fmt.Printf("Data store: %s\n", config.DataStoreDir())
 			fmt.Printf("Public key: %x\n", kr.Identity().Public)
 			fmt.Println()
 			fmt.Println("IMPORTANT: run `hidage recovery-code` and write down the phrase.")

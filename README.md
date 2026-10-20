@@ -45,9 +45,10 @@ files ─FastCDC chunk─▶ chunks ─encrypt─▶ Merkle DAG (file + tree nod
 
 | What | Where | Notes |
 |---|---|---|
+| Settings | `~/.config/hidage/config.toml` | written with commented defaults by `init`: nickname, store, listen address, hosting quota/lease, redundancy |
 | Keyring (root secret → master key + identity) | `~/.config/hidage/keyring.json` | one 32-byte root, wrapped under your passphrase; export it as a recovery phrase |
 | Per-folder metadata (config, snapshots, DAG nodes) | `<folder>/.hidage/` | travels with the folder, like `.git` |
-| Bulk chunk data | `$HIDAGE_STORE` or `/opt/hidage/store` | node-wide, outside `$HOME`; one pooled copy per chunk, hard-linked per repo so identical chunks dedup across folders |
+| Bulk chunk data | `~/.local/share/hidage/store` (or `store` in config, or `$HIDAGE_STORE`) | node-wide; one pooled copy per chunk, hard-linked per repo so identical chunks dedup across folders |
 
 > **Want the real internals?** [`DESIGN.md`](DESIGN.md) details the key hierarchy, the
 > deterministic AEAD scheme, the DAG node formats, snapshot signing/history, and the
@@ -104,9 +105,11 @@ hidage accounting                 # bytes you store for peers vs. they store for
 - A tracked folder is one containing `.hidage/`; `snapshot` creates it on first use.
   Other commands **discover it by walking up from the current directory** (git-style),
   or pass `-C <dir>` to start elsewhere.
-- The **bulk chunk store** defaults to `/opt/hidage/store`; override with the
-  `HIDAGE_STORE` env var (create it once and make it writable — `hidage` prints the exact
-  commands if it can't).
+- The **bulk chunk store** defaults to `~/.local/share/hidage/store` (an existing
+  `/opt/hidage/store` is still used); set `store` in `config.toml` or the `HIDAGE_STORE` env
+  var to put it elsewhere, on a roomy disk excluded from your backups.
+- **Settings** live in `~/.config/hidage/config.toml`; `serve` and `publish` take their
+  listen address, lease, redundancy and minimum peer count from it unless a flag overrides.
 - Snapshot IDs may be given as any unambiguous **prefix**.
 - The passphrase (set at `init`) is read interactively; for scripting/tests set
   `HIDAGE_PASSPHRASE`.
@@ -172,7 +175,7 @@ peers, one killed, full byte-identical recovery from the survivors).
 | Path | Responsibility |
 |---|---|
 | `cmd/hidage` | CLI: snapshot/restore/diff/prune, recovery-code/recover, trust, serve/publish/net-restore/net-list, audit/reputation/accounting |
-| `internal/config` | config + data-store path resolution (`HIDAGE_STORE`) |
+| `internal/config` | `config.toml` settings, config + data-store path resolution (`HIDAGE_STORE`) |
 | `internal/keyring` | root secret (wrapped under passphrase) → master key + identity; BIP39 recovery code |
 | `internal/identity` | Ed25519 keypair derived from the keyring (libp2p peer key) |
 | `internal/trust` | peer trust policy: whitelist / blocklist, consulted before reputation |

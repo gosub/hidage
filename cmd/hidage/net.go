@@ -75,6 +75,13 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			settings, _ := config.Load()
+			if !cmd.Flags().Changed("listen") && len(settings.Listen) > 0 {
+				listen = settings.Listen[0]
+			}
+			if !cmd.Flags().Changed("lease") {
+				leaseHours = settings.Hosting.LeaseDays * 24
+			}
 			pub, err := publishedStore()
 			if err != nil {
 				return err
@@ -133,11 +140,11 @@ func newServeCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&listen, "listen", "", "listen multiaddr (default: ephemeral TCP on all interfaces)")
+	cmd.Flags().StringVar(&listen, "listen", "", "listen multiaddr (default: first `listen` in config.toml)")
 	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
 	cmd.Flags().Float64Var(&ratio, "ratio", accounting.DefaultRatio, "max bytes stored per peer per byte they store for us")
 	cmd.Flags().Int64Var(&freeMiB, "free", accounting.DefaultFreeQuota>>20, "free quota per peer, in MiB (no reciprocation required)")
-	cmd.Flags().IntVar(&leaseHours, "lease", 168, "hosted-shard lease in hours; data not renewed (re-published) within this is reclaimed")
+	cmd.Flags().IntVar(&leaseHours, "lease", 0, "hosted-shard lease in hours; data not renewed within this is reclaimed (default: hosting.lease_days)")
 	return cmd
 }
 
@@ -198,6 +205,13 @@ func newPublishCmd() *cobra.Command {
 			objs, err := r.PublishSet(snap)
 			if err != nil {
 				return err
+			}
+			settings, _ := config.Load()
+			if !cmd.Flags().Changed("redundancy") {
+				redundancy = settings.Backup.Redundancy
+			}
+			if !cmd.Flags().Changed("min-peers") {
+				minPeers = settings.Backup.MinFriends
 			}
 
 			// Erasure-code the snapshot's objects into shards; the Release
@@ -362,8 +376,8 @@ func newPublishCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
 	cmd.Flags().StringArrayVar(&peers, "peer", nil, "storage peer multiaddr(s) to push to")
 	cmd.Flags().BoolVar(&useTrusted, "trusted", false, "also push to every trusted peer found online (see `hidage trust`)")
-	cmd.Flags().IntVar(&minPeers, "min-peers", 1, "fail unless at least this many acceptable peers are reachable")
-	cmd.Flags().Float64Var(&redundancy, "redundancy", 2.0, "shards to emit per shard needed (e.g. 2.0 tolerates losing half)")
+	cmd.Flags().IntVar(&minPeers, "min-peers", 0, "fail unless at least this many acceptable peers are reachable (default: backup.min_friends)")
+	cmd.Flags().Float64Var(&redundancy, "redundancy", 0, "shards to emit per shard needed, e.g. 2.0 tolerates losing half (default: backup.redundancy)")
 	return cmd
 }
 
@@ -377,11 +391,11 @@ type peerID struct {
 // SnapshotID names the published snapshot so `status` can detect a repository
 // whose latest snapshot has not been re-published.
 type distribution struct {
-	ReleaseID  string              `json:"releaseID"`
-	SnapshotID string              `json:"snapshotID"`
-	Redundancy float64             `json:"redundancy"`
-	PublishedAt time.Time          `json:"publishedAt"`
-	Peers      map[string][]string `json:"peers"` // peer pubkey hex -> shard ids
+	ReleaseID   string              `json:"releaseID"`
+	SnapshotID  string              `json:"snapshotID"`
+	Redundancy  float64             `json:"redundancy"`
+	PublishedAt time.Time           `json:"publishedAt"`
+	Peers       map[string][]string `json:"peers"` // peer pubkey hex -> shard ids
 }
 
 func writeDistribution(path string, d distribution) error {

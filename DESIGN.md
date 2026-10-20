@@ -63,7 +63,7 @@ it):
   objects/<id>         # meta store: encrypted DAG nodes (file/tree), small
   snapshots/<id>.json  # one signed snapshot root per version
 
-$HIDAGE_STORE (default /opt/hidage/store)
+<data store>  (default ~/.local/share/hidage/store)
   pool/<id>            # one canonical encrypted copy of each chunk (the bulk)
   refs/<repoID>/<id>   # this repo's hard links into the pool — its reference set
 ```
@@ -72,7 +72,8 @@ $HIDAGE_STORE (default /opt/hidage/store)
 master key (loaded once via `internal/keyring`) and the data-store path. `Find` locates a
 repository by walking up from the current directory, so commands work git-style from
 anywhere inside a tracked folder; `snapshot` auto-creates `.hidage/` on first use. The
-data store path comes from `$HIDAGE_STORE` or the `/opt/hidage/store` default; a
+data store path comes from `$HIDAGE_STORE`, else `store` in `config.toml`, else an existing
+legacy `/opt/hidage/store`, else `$XDG_DATA_HOME/hidage/store`; a
 permission failure there yields actionable setup guidance.
 
 ### Content-defined chunking (`internal/chunk`)
