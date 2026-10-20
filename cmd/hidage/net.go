@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -214,10 +213,7 @@ func reapLoop(ctx context.Context, h *hosting.Host, lease, trashAge time.Duratio
 }
 
 func newPublishCmd() *cobra.Command {
-	var peers []string
-	var redundancy float64
-	var useFriends bool
-	var minPeers int
+	var opts publishOpts
 	cmd := &cobra.Command{
 		Use:   "publish",
 		Short: "Erasure-code the latest snapshot, spread shards across peers, publish the head",
@@ -235,48 +231,17 @@ func newPublishCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			snap, err := r.Latest()
-			if err != nil {
-				return err
-			}
-			if snap == nil {
-				return fmt.Errorf("no snapshots to publish")
-			}
-			// Check where to publish before the expensive packing and networking.
 			book, err := loadFriends()
-			if err != nil {
-				return err
-			}
-			if len(peers) == 0 {
-				useFriends = true
-				if len(book.List()) == 0 {
-					return fmt.Errorf("no friends to publish to; add one with `hidage friend add <card>` (or pass --peer)")
-				}
-			}
-			objs, err := r.PublishSet(snap)
 			if err != nil {
 				return err
 			}
 			settings, _ := config.Load()
 			if !cmd.Flags().Changed("redundancy") {
-				redundancy = settings.Backup.Redundancy
+				opts.redundancy = settings.Backup.Redundancy
 			}
 			if !cmd.Flags().Changed("min-peers") {
-				minPeers = settings.Backup.MinFriends
+				opts.minPeers = settings.Backup.MinFriends
 			}
-
-			// Erasure-code the snapshot's objects into shards; the Release
-			// descriptor (pushed to every peer) records how to reassemble them.
-			rel, shardBlobs, err := pack.Build(objs, redundancy, snap.ID)
-			if err != nil {
-				return err
-			}
-			relBytes, err := json.Marshal(rel)
-			if err != nil {
-				return err
-			}
-			relID := store.ID(relBytes)
-
 			node, err := p2p.New(kr.Identity(), nil, nil)
 			if err != nil {
 				return err
@@ -284,141 +249,12 @@ func newPublishCmd() *cobra.Command {
 			defer node.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
-
-			// Collect candidate peers: explicit --peer multiaddrs, plus (with
-			// --friends) every friend reachable at a known address.
-			seen := map[peer.ID]bool{}
-			var accepted []peerID
-			add := func(pid peer.ID) {
-				if seen[pid] || pid == node.ID() {
-					return
-				}
-				seen[pid] = true
-				pubHex, _ := p2p.PeerPubKeyHex(pid)
-				accepted = append(accepted, peerID{id: pid, pubHex: pubHex})
-			}
-			for _, addr := range peers {
-				pid, err := node.Connect(ctx, addr)
-				if err != nil {
-					fmt.Printf("  %s: %v\n", addr, err)
-					continue
-				}
-				add(pid)
-			}
-			var reached []friends.Friend
-			if useFriends {
-				reached = reachFriends(ctx, node, book, false)
-				for _, pid := range peerIDs(reached) {
-					add(pid)
-				}
-			}
-			if len(accepted) == 0 {
-				return fmt.Errorf("no friends reachable to publish to (see `hidage friend ls`)")
-			}
-			if len(accepted) < minPeers {
-				return fmt.Errorf("only %d acceptable peer(s) reachable, need at least --min-peers=%d", len(accepted), minPeers)
-			}
-
-			// Merge this repo's release into the owner's account manifest, so the
-			// single head pointer indexes every backed-up folder, not just this one.
-			manifest := fetchManifest(ctx, node, peerIDs(reached))
-			manifest.Upsert(account.Entry{
-				RepoID:    r.RepoID(),
-				Name:      snap.Source,
-				ReleaseID: relID,
-				UpdatedAt: time.Now().UTC(),
-			})
-			// Seal the friend list into the manifest, so recovering from any one
-			// friend finds all of them.
-			if err := manifest.SetRoster(kr.MasterKey(), rosterOf(book)); err != nil {
-				return err
-			}
-			manifestBytes, err := manifest.Bytes()
-			if err != nil {
-				return err
-			}
-			manifestID := store.ID(manifestBytes)
-			// Erasure coding only helps if shards land on enough distinct peers.
-			tolerate := int(float64(len(accepted)) * (1 - 1/redundancy))
-			if tolerate == 0 {
-				fmt.Printf("WARNING: %d peer(s) at %.1fx redundancy gives no fault tolerance "+
-					"(losing one peer loses the backup); use more peers or higher --redundancy.\n",
-					len(accepted), redundancy)
-			} else {
-				fmt.Printf("Spreading across %d peers; tolerates losing up to %d.\n", len(accepted), tolerate)
-			}
-
-			common := map[string][]byte{relID: relBytes, manifestID: manifestBytes}
-			assignments := spreadShards(shardBlobs, common, len(accepted))
-			dist := distribution{ReleaseID: relID, SnapshotID: snap.ID, Redundancy: redundancy, PublishedAt: time.Now().UTC(), Peers: map[string][]string{}}
-			setID := hostedSetID(kr.MasterKey(), r.RepoID())
-			var holders []peerID
-			for i, p := range accepted {
-				push := assignments[i]
-				var shardIDs []string
-				for id := range push {
-					if _, isShard := shardBlobs[id]; isShard {
-						shardIDs = append(shardIDs, id)
-					}
-				}
-				name := peerName(book, p)
-				res, err := node.PushSet(ctx, p.id, setID, push)
-				var qe *p2p.QuotaError
-				switch {
-				case errors.As(err, &qe):
-					fmt.Printf("  %s: not enough space: this backup needs %s there, they give you %s\n",
-						name, config.FormatSize(qe.Need), config.FormatSize(qe.Give))
-					continue
-				case err != nil:
-					fmt.Printf("  %s: %v\n", name, err)
-					continue
-				}
-				dist.Peers[p.pubHex] = shardIDs // remember what to audit them for
-				holders = append(holders, p)
-				book.Update(p.pubHex, func(f *friends.Friend) error {
-					f.StoredThere, f.QuotaThere = res.Held, res.Give
-					return nil
-				})
-				fmt.Printf("  %s: %d shards, sent %d new (%s); you use %s of %s there\n",
-					name, len(shardIDs), res.Sent, config.FormatSize(res.SentBytes),
-					config.FormatSize(res.Held), config.FormatSize(res.Give))
-			}
-			// Shards assigned to a peer that didn't store them are missing; the
-			// release is only rebuildable if no more peers failed than it tolerates.
-			if failed := len(accepted) - len(holders); failed > tolerate || len(holders) == 0 {
-				return fmt.Errorf("only %d of %d peers stored their shards, too few to rebuild the backup; "+
-					"the previous publish (if any) is still the one on record", len(holders), len(accepted))
-			} else if failed > 0 {
-				fmt.Printf("WARNING: %d peer(s) did not store their shards; the backup is rebuildable but has less fault tolerance than planned.\n", failed)
-			}
-			if err := writeDistribution(r.HidageFile("distribution.json"), dist); err != nil {
-				return err
-			}
-			headVal, err := p2p.SignHead(kr.Identity(), manifestID)
-			if err != nil {
-				return err
-			}
-			// Hand the signed head to every friend reached (not just this repo's
-			// holders: the manifest indexes all repos), so it can be asked back
-			// during recovery.
-			for _, pid := range peerIDs(reached) {
-				_ = node.PushHead(ctx, pid, headVal)
-			}
-			for _, p := range holders {
-				if !seenFriend(reached, p.pubHex) {
-					_ = node.PushHead(ctx, p.id, headVal)
-				}
-			}
-			fmt.Printf("Published %q (%s) as %d shards across %d peers (%.1fx redundancy).\n",
-				snap.Source, r.RepoID()[:12], len(shardBlobs), len(holders), redundancy)
-			fmt.Printf("Account now indexes %d backup(s).\n", len(manifest.Entries))
-			return nil
+			return publishRepo(ctx, node, kr, r, book, opts, os.Stdout)
 		},
 	}
-	cmd.Flags().StringArrayVar(&peers, "peer", nil, "push to this peer multiaddr instead of your friends")
-	cmd.Flags().BoolVar(&useFriends, "friends", false, "push to every reachable friend (the default when no --peer is given)")
-	cmd.Flags().IntVar(&minPeers, "min-peers", 0, "fail unless at least this many acceptable peers are reachable (default: backup.min_friends)")
-	cmd.Flags().Float64Var(&redundancy, "redundancy", 0, "shards to emit per shard needed, e.g. 2.0 tolerates losing half (default: backup.redundancy)")
+	cmd.Flags().StringArrayVar(&opts.peers, "peer", nil, "push to this peer multiaddr instead of your friends")
+	cmd.Flags().IntVar(&opts.minPeers, "min-peers", 0, "fail unless at least this many acceptable peers are reachable (default: backup.min_friends)")
+	cmd.Flags().Float64Var(&opts.redundancy, "redundancy", 0, "shards to emit per shard needed, e.g. 2.0 tolerates losing half (default: backup.redundancy)")
 	return cmd
 }
 
