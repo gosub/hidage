@@ -27,15 +27,15 @@ import (
 
 // Friend is one entry in the friend list.
 type Friend struct {
-	PubKey   string    `json:"-"` // hex Ed25519 public key (the map key on disk)
-	Nickname string    `json:"nickname"`
-	Addrs    []string  `json:"addrs,omitempty"` // multiaddrs without the /p2p/<id> suffix
+	PubKey   string   `json:"-"` // hex Ed25519 public key (the map key on disk)
+	Nickname string   `json:"nickname"`
+	Addrs    []string `json:"addrs,omitempty"` // multiaddrs without the /p2p/<id> suffix
 	// AddrSeq and AddrSig are set when Addrs came from the friend's own signed
 	// address record (so it can be passed on to other friends); a card leaves
 	// them empty.
-	AddrSeq int64  `json:"addrSeq,omitempty"`
-	AddrSig []byte `json:"addrSig,omitempty"`
-	Give     int64     `json:"give"`            // bytes this node will store for them
+	AddrSeq  int64     `json:"addrSeq,omitempty"`
+	AddrSig  []byte    `json:"addrSig,omitempty"`
+	Give     int64     `json:"give"` // bytes this node will store for them
 	AddedAt  time.Time `json:"addedAt"`
 	LastSeen time.Time `json:"lastSeen,omitzero"`
 

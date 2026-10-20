@@ -70,7 +70,6 @@ func newAuditCmd() *cobra.Command {
 				return fmt.Errorf("the published release can't be regenerated; re-publish before auditing")
 			}
 
-
 			node, err := p2p.New(kr.Identity(), nil, nil)
 			if err != nil {
 				return err
