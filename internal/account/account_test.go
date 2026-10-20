@@ -1,6 +1,7 @@
 package account
 
 import (
+	"bytes"
 	"testing"
 	"time"
 )
@@ -54,5 +55,29 @@ func TestBytesRoundtripDeterministic(t *testing.T) {
 	}
 	if len(parsed.Entries) != 2 || parsed.Entries[0].RepoID != "a" {
 		t.Fatalf("roundtrip/sort wrong: %+v", parsed.Entries)
+	}
+}
+
+func TestRosterSealed(t *testing.T) {
+	m := New()
+	if r, err := m.OpenRoster(make([]byte, 32)); r != nil || err != nil {
+		t.Fatalf("empty roster = %v, %v", r, err)
+	}
+	key := bytes.Repeat([]byte{1}, 32)
+	want := []RosterEntry{{PubKey: "ab", Nickname: "bob", Addrs: []string{"/ip4/192.0.2.1/tcp/4001"}, Give: 9}}
+	if err := m.SetRoster(key, want); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := m.Bytes()
+	if bytes.Contains(raw, []byte("bob")) {
+		t.Fatal("roster is readable in the manifest")
+	}
+	parsed, _ := Parse(raw)
+	got, err := parsed.OpenRoster(key)
+	if err != nil || len(got) != 1 || got[0].Nickname != "bob" || got[0].Give != 9 {
+		t.Fatalf("roster = %+v, %v", got, err)
+	}
+	if _, err := parsed.OpenRoster(bytes.Repeat([]byte{2}, 32)); err == nil {
+		t.Fatal("roster opened with the wrong key")
 	}
 }
