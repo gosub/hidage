@@ -81,7 +81,9 @@ func TestInterval(t *testing.T) {
 	if i.UnmarshalText([]byte("-1h")) == nil || i.UnmarshalText([]byte("often")) == nil {
 		t.Error("bad intervals accepted")
 	}
-	if s := Interval(24 * time.Hour).String(); s != "24h" {
-		t.Errorf("String = %q", s)
+	for d, want := range map[time.Duration]string{24 * time.Hour: "24h", 30 * time.Minute: "30m", 10 * time.Second: "10s", 90 * time.Minute: "90m"} {
+		if s := Interval(d).String(); s != want {
+			t.Errorf("String(%v) = %q, want %q", d, s, want)
+		}
 	}
 }

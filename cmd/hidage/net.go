@@ -41,126 +41,9 @@ func headsStore() (*store.KeyedStore, error) {
 	return store.NewKeyedStore(filepath.Join(config.DataStoreDir(), "heads"))
 }
 
-func newServeCmd() *cobra.Command {
-	var listen []string
-	cmd := &cobra.Command{
-		Use:   "serve",
-		Short: "Run a node: host and serve friends' data, relay for them, keep in touch",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			kr, err := unlock()
-			if err != nil {
-				return err
-			}
-			settings, _ := config.Load()
-			if !cmd.Flags().Changed("listen") {
-				listen = settings.Listen
-			}
-			reach, err := p2p.ParseReachability(settings.Reachability)
-			if err != nil {
-				return err
-			}
-			hosted, err := hostedStore()
-			if err != nil {
-				return err
-			}
-			book, err := loadFriends()
-			if err != nil {
-				return err
-			}
-			isFriend := func(id peer.ID) bool {
-				book.Refresh() // pick up `friend add/rm` made while serving
-				return book.IsFriendPeer(id)
-			}
-			invites, err := openInvites()
-			if err != nil {
-				return err
-			}
-			// While an invite is open, strangers may connect, but only to pair:
-			// every other protocol checks friendship (WithFriends, hosting quota).
-			admit := func(id peer.ID) bool { return isFriend(id) || invites.Pending() }
-			if reach == p2p.ReachabilityAuto && !hasPublicInterface() {
-				// No public IP on any interface: behind a NAT unless a port is
-				// forwarded (then set reachability = "public"). Deciding now, rather
-				// than waiting for AutoNAT, which needs several peers to agree,
-				// gets relay reservations in place even in a two-friend group.
-				reach = p2p.ReachabilityPrivate
-			}
-			node, err := p2p.New(kr.Identity(), nil, listen,
-				p2p.WithInboundFilter(admit), // friends only (and invitees while an invite is open)
-				p2p.WithFriends(isFriend),
-				p2p.WithRelayService(isFriend), // relay for friends while reachable
-				p2p.WithRelayCandidates(func() []peer.AddrInfo { return friendAddrInfos(book) }),
-				p2p.WithReachability(reach))
-			if err != nil {
-				return err
-			}
-			defer node.Close()
-
-			ctx := context.Background()
-			heads, err := headsStore()
-			if err != nil {
-				return err
-			}
-			node.EnableHeadStore(heads.Put, heads.Get) // owner-signed; returned to the owner on recovery
-			node.EnableAddrService(func(subject string) *p2p.AddrRecord { return storedAddrRecord(book, subject) })
-			node.EnablePairing(func(from peer.ID, token []byte, cardStr string) (string, bool) {
-				card, err := friends.DecodeCard(cardStr)
-				if err != nil {
-					return "", false
-				}
-				if pid, err := friends.PeerIDFromHex(hex.EncodeToString(card.PubKey)); err != nil || pid != from {
-					return "", false // the card must be the requester's own
-				}
-				inv, ok := invites.Consume(token)
-				if !ok {
-					return "", false
-				}
-				card.Token = nil
-				f, _, err := book.Add(card, inv.Nickname, inv.Give)
-				if err != nil {
-					return "", false
-				}
-				fmt.Printf("[friends] %s accepted your invite and is now a friend\n", f.Nickname)
-				return cardFor(kr.Identity().Public, node.ListenAddrs()).Encode(), true
-			})
-			node.EnableHosting(hosted,
-				func(ownerHex string) int64 {
-					f, ok := book.Get(ownerHex)
-					if !ok {
-						return 0 // friends only
-					}
-					return f.Give
-				},
-				func(ownerHex string, held int64) {
-					book.Update(ownerHex, func(f *friends.Friend) error { f.LastSeen = time.Now().UTC(); return nil })
-				})
-			go keepInTouchLoop(ctx, node, book)
-			go reapLoop(ctx, hosted, time.Duration(settings.Hosting.LeaseDays)*24*time.Hour,
-				time.Duration(settings.Hosting.TrashDays)*24*time.Hour)
-
-			if err := writeNodeState(node.ListenAddrs()); err != nil {
-				return err
-			}
-			defer os.Remove(nodeStatePath())
-			go nodeStateLoop(ctx, node) // relay and port-mapped addresses appear later
-			fmt.Println("hidage node listening; addresses:")
-			for _, a := range node.Addrs() {
-				fmt.Printf("  %s\n", a)
-			}
-			fmt.Println("Friends add you with the card from `hidage id --card`.")
-			fmt.Println("Ctrl-C to stop.")
-			waitForSignal()
-			return nil
-		},
-	}
-	cmd.Flags().StringArrayVar(&listen, "listen", nil, "listen multiaddr(s) (default: `listen` in config.toml)")
-	return cmd
-}
-
 // nodeStateLoop keeps node.json in step with the node's addresses, which change
 // as relay reservations, port mappings and observed addresses come and go.
-func nodeStateLoop(ctx context.Context, node *p2p.Node) {
+func nodeStateLoop(ctx context.Context, node *p2p.Node, locked bool) {
 	last := strings.Join(node.ListenAddrs(), " ")
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
@@ -172,7 +55,7 @@ func nodeStateLoop(ctx context.Context, node *p2p.Node) {
 			addrs := node.ListenAddrs()
 			if cur := strings.Join(addrs, " "); cur != last {
 				last = cur
-				_ = writeNodeState(addrs)
+				_ = writeNodeState(addrs, locked)
 			}
 		}
 	}

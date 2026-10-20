@@ -72,6 +72,7 @@ func ownPublicKey() (ed25519.PublicKey, error) {
 type nodeState struct {
 	Addrs     []string  `json:"addrs"`
 	PID       int       `json:"pid"`
+	Locked    bool      `json:"locked,omitempty"` // running without the master key: hosting only, no backups
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
@@ -80,26 +81,33 @@ func nodeStatePath() string {
 	return filepath.Join(p.Dir, "node.json")
 }
 
-func writeNodeState(addrs []string) error {
-	data, err := json.MarshalIndent(nodeState{Addrs: addrs, PID: os.Getpid(), UpdatedAt: time.Now().UTC()}, "", "  ")
+func writeNodeState(addrs []string, locked bool) error {
+	data, err := json.MarshalIndent(nodeState{Addrs: addrs, PID: os.Getpid(), Locked: locked, UpdatedAt: time.Now().UTC()}, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(nodeStatePath(), data, 0o600)
 }
 
-// runningNodeAddrs returns the addresses of a running node, or false if none is
+// runningNode returns the state of the running daemon, or false if none is
 // running (no state file, or its process is gone).
-func runningNodeAddrs() ([]string, bool) {
+func runningNode() (nodeState, bool) {
+	var st nodeState
 	data, err := os.ReadFile(nodeStatePath())
 	if err != nil {
-		return nil, false
+		return st, false
 	}
-	var st nodeState
 	if json.Unmarshal(data, &st) != nil || !processAlive(st.PID) {
-		return nil, false
+		return st, false
 	}
-	return st.Addrs, true
+	return st, true
+}
+
+// runningNodeAddrs returns the addresses of the running daemon, or false if
+// none is running.
+func runningNodeAddrs() ([]string, bool) {
+	st, ok := runningNode()
+	return st.Addrs, ok
 }
 
 // ownCard builds this node's contact card from the running node's addresses, or

@@ -96,5 +96,12 @@ func (i *Interval) UnmarshalText(b []byte) error {
 func (i Interval) MarshalText() ([]byte, error) { return []byte(i.String()), nil }
 
 func (i Interval) String() string {
-	return strings.TrimSuffix(strings.TrimSuffix(time.Duration(i).String(), "0s"), "0m")
+	d := time.Duration(i)
+	switch {
+	case d > 0 && d%time.Hour == 0:
+		return fmt.Sprintf("%dh", d/time.Hour)
+	case d > 0 && d%time.Minute == 0:
+		return fmt.Sprintf("%dm", d/time.Minute)
+	}
+	return d.String()
 }

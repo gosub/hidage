@@ -40,7 +40,7 @@ func main() {
 		newRecoverCmd(),
 		newIDCmd(),
 		newFriendCmd(),
-		newServeCmd(),
+		newDaemonCmd(),
 		newPublishCmd(),
 		newNetRestoreCmd(),
 		newNetListCmd(),

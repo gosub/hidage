@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -29,6 +30,13 @@ func newStatusCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("Repository %s  (%s)\n", r.RepoID()[:12], r.Folder)
+			settings, _ := config.Load()
+			scheduled := false
+			for _, f := range settings.Backup.FolderPaths() {
+				if abs, err := filepath.Abs(f); err == nil && abs == r.Folder {
+					scheduled = true
+				}
+			}
 
 			degraded := false
 			warn := func(format string, a ...any) {
@@ -36,6 +44,18 @@ func newStatusCmd() *cobra.Command {
 				fmt.Printf("  ! "+format+"\n", a...)
 			}
 
+			switch st, running := runningNode(); {
+			case running && st.Locked:
+				warn("the daemon is running but locked: it hosts for friends but takes no backups (set passphrase_command)")
+			case running && scheduled:
+				fmt.Printf("  daemon:        running, backs this folder up every %s\n", settings.Backup.Every)
+			case running:
+				fmt.Println("  daemon:        running (this folder is not in `folders` in config.toml, so it is backed up only by hand)")
+			case scheduled:
+				warn("the daemon is not running, so this folder is not being backed up (run `hidage daemon`)")
+			default:
+				fmt.Println("  daemon:        not running (backups happen only when you run them)")
+			}
 			if len(snaps) == 0 {
 				warn("no snapshots yet — nothing is backed up (run `hidage snapshot`)")
 				return exitCode(degraded)
@@ -60,7 +80,6 @@ func newStatusCmd() *cobra.Command {
 			}
 			// Friends drop a backup that isn't renewed within their lease; assume
 			// theirs matches ours.
-			settings, _ := config.Load()
 			lease := time.Duration(settings.Hosting.LeaseDays) * 24 * time.Hour
 			if left := lease - time.Since(dist.PublishedAt); left < 14*24*time.Hour {
 				if left <= 0 {
