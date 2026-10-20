@@ -43,12 +43,13 @@ func TestCardRoundTrip(t *testing.T) {
 
 func TestCardDamageDetected(t *testing.T) {
 	s := newCard(t, "bob", "/ip4/192.0.2.1/tcp/4001").Encode()
-	last := s[len(s)-1]
+	mid := len(s) / 2
 	flip := byte('a')
-	if last == 'a' {
+	if s[mid] == 'a' {
 		flip = 'b'
 	}
-	for _, bad := range []string{s[:len(s)-1] + string(flip), s[:30], "hello", strings.TrimPrefix(s, CardPrefix)} {
+	damaged := s[:mid] + string(flip) + s[mid+1:]
+	for _, bad := range []string{damaged, s[:30], "hello", strings.TrimPrefix(s, CardPrefix)} {
 		if _, err := DecodeCard(bad); err == nil {
 			t.Errorf("DecodeCard(%q) should fail", bad)
 		}
