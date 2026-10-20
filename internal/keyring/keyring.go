@@ -32,11 +32,15 @@ const (
 )
 
 // wrapped is the on-disk form: Argon2id parameters plus the root sealed under the
-// passphrase KEK. The raw root is never written.
+// passphrase KEK. The raw root is never written. The identity public key is kept
+// in the clear so commands that only need to say who this node is (e.g. `hidage
+// id`) don't have to prompt for the passphrase; it is checked against the root on
+// every unlock.
 type wrapped struct {
 	Version     int                 `json:"version"`
 	Argon2      crypto.Argon2Params `json:"argon2"`
 	WrappedRoot []byte              `json:"wrappedRoot"`
+	PublicKey   []byte              `json:"publicKey,omitempty"`
 }
 
 // Keyring is an unlocked root secret with its derived keys.
@@ -105,7 +109,39 @@ func Load(path, passphrase string) (*Keyring, error) {
 	if err != nil {
 		return nil, errors.New("cannot unlock keyring (wrong passphrase?)")
 	}
-	return &Keyring{root: root}, nil
+	k := &Keyring{root: root}
+	pub := k.Identity().Public
+	switch {
+	case w.PublicKey == nil:
+		// Written before the public key was stored: record it now (best effort).
+		w.PublicKey = pub
+		if data, err := json.MarshalIndent(w, "", "  "); err == nil {
+			_ = os.WriteFile(path, data, 0o600)
+		}
+	case !ed25519.PublicKey(w.PublicKey).Equal(pub):
+		return nil, errors.New("keyring public key does not match its root secret (file corrupted?)")
+	}
+	return k, nil
+}
+
+// ErrNoPublicKey means the keyring predates the stored public key; unlocking it
+// once records the key.
+var ErrNoPublicKey = errors.New("keyring has no stored public key")
+
+// PublicKey returns the node's identity public key without unlocking the keyring.
+func PublicKey(path string) (ed25519.PublicKey, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read keyring: %w", err)
+	}
+	var w wrapped
+	if err := json.Unmarshal(raw, &w); err != nil {
+		return nil, fmt.Errorf("parse keyring: %w", err)
+	}
+	if len(w.PublicKey) != ed25519.PublicKeySize {
+		return nil, ErrNoPublicKey
+	}
+	return ed25519.PublicKey(w.PublicKey), nil
 }
 
 // Restore writes a new keyring from a BIP39 recovery mnemonic, wrapped under a
@@ -137,7 +173,8 @@ func persist(path string, root []byte, passphrase string) error {
 	if err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(wrapped{Version: 1, Argon2: argon, WrappedRoot: wr}, "", "  ")
+	pub := (&Keyring{root: root}).Identity().Public
+	data, err := json.MarshalIndent(wrapped{Version: 1, Argon2: argon, WrappedRoot: wr, PublicKey: pub}, "", "  ")
 	if err != nil {
 		return err
 	}

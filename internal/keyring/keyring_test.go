@@ -2,6 +2,8 @@ package keyring
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -76,5 +78,43 @@ func TestRestoreRejectsGarbage(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "keyring.json")
 	if _, err := Restore(path, "not a valid mnemonic at all", "p"); err == nil {
 		t.Fatal("expected invalid recovery code to fail")
+	}
+}
+
+func TestPublicKeyWithoutUnlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keyring.json")
+	kr, err := Init(path, "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := PublicKey(path)
+	if err != nil || !bytes.Equal(pub, kr.Identity().Public) {
+		t.Fatalf("PublicKey = %x, %v; want %x", pub, err, kr.Identity().Public)
+	}
+
+	// A keyring written before the public key was stored gets it on first unlock.
+	var w wrapped
+	raw, _ := os.ReadFile(path)
+	json.Unmarshal(raw, &w)
+	w.PublicKey = nil
+	raw, _ = json.Marshal(w)
+	os.WriteFile(path, raw, 0o600)
+	if _, err := PublicKey(path); err != ErrNoPublicKey {
+		t.Fatalf("legacy keyring: err = %v, want ErrNoPublicKey", err)
+	}
+	if _, err := Load(path, "pass"); err != nil {
+		t.Fatal(err)
+	}
+	if pub, err := PublicKey(path); err != nil || !bytes.Equal(pub, kr.Identity().Public) {
+		t.Fatalf("after unlock: PublicKey = %x, %v", pub, err)
+	}
+
+	// A stored key that doesn't match the root is rejected.
+	json.Unmarshal(raw, &w)
+	w.PublicKey = make([]byte, 32)
+	raw, _ = json.Marshal(w)
+	os.WriteFile(path, raw, 0o600)
+	if _, err := Load(path, "pass"); err == nil {
+		t.Fatal("mismatched public key should fail to load")
 	}
 }
