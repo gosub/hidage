@@ -12,6 +12,7 @@ type Option func(*options)
 
 type options struct {
 	allowInbound    func(peer.ID) bool
+	isFriend        func(peer.ID) bool
 	relayFor        func(peer.ID) bool
 	relayCandidates func() []peer.AddrInfo
 	reachability    Reachability
@@ -23,6 +24,14 @@ type options struct {
 // filtered: a node only dials peers it chose to.
 func WithInboundFilter(allow func(peer.ID) bool) Option {
 	return func(o *options) { o.allowInbound = allow }
+}
+
+// WithFriends tells the node who its friends are, for protocols that must not
+// serve other peers even when they are let in (e.g. to pair with an invite):
+// head records and other friends' address records. Without it, every connected
+// peer counts as a friend.
+func WithFriends(isFriend func(peer.ID) bool) Option {
+	return func(o *options) { o.isFriend = isFriend }
 }
 
 // inboundGater is a libp2p ConnectionGater that filters authenticated inbound

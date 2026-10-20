@@ -417,3 +417,45 @@ func TestInboundFilter(t *testing.T) {
 		t.Fatalf("outbound dial to a non-friend should work: %v", err)
 	}
 }
+
+func TestPairAndFriendsOnlyHandlers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	token := bytes.Repeat([]byte{7}, 16)
+	friends := map[peer.ID]bool{}
+	id, _ := identity.Generate()
+	inviter, err := New(id, nil, []string{"/ip4/127.0.0.1/tcp/0"}, WithFriends(func(p peer.ID) bool { return friends[p] }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { inviter.Close() })
+	stored := map[string][]byte{}
+	inviter.EnableHeadStore(func(o string, v []byte) error { stored[o] = v; return nil }, nil)
+	inviter.EnablePairing(func(from peer.ID, tok []byte, card string) (string, bool) {
+		if !bytes.Equal(tok, token) || card != "invitee-card" {
+			return "", false
+		}
+		friends[from] = true
+		return "inviter-card", true
+	})
+
+	invitee, idB := newNodeID(t, nil)
+	invitee.Connect(ctx, inviter.Addrs()[0])
+
+	// Not a friend yet: head records are not accepted.
+	head, _ := SignHead(idB, "m")
+	if err := invitee.PushHead(ctx, inviter.ID(), head); err == nil || len(stored) != 0 {
+		t.Fatal("non-friend's head record was accepted")
+	}
+	if _, err := invitee.Pair(ctx, inviter.ID(), bytes.Repeat([]byte{1}, 16), "invitee-card"); !errors.Is(err, ErrPairRefused) {
+		t.Fatalf("wrong token: err = %v", err)
+	}
+	reply, err := invitee.Pair(ctx, inviter.ID(), token, "invitee-card")
+	if err != nil || reply != "inviter-card" {
+		t.Fatalf("pair = %q, %v", reply, err)
+	}
+	if err := invitee.PushHead(ctx, inviter.ID(), head); err != nil || len(stored) != 1 {
+		t.Fatalf("friend's head record refused after pairing: %v", err)
+	}
+}

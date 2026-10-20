@@ -95,6 +95,9 @@ const maxHeadRecord = 4096 // a head record is a tiny signed JSON blob
 func (n *Node) EnableHeadStore(put func(ownerHex string, val []byte) error, get func(ownerHex string) ([]byte, error)) {
 	n.host.SetStreamHandler(HeadPushProtocol, func(s network.Stream) {
 		defer s.Close()
+		if !n.isFriend(s.Conn().RemotePeer()) {
+			return
+		}
 		br := bufio.NewReader(s)
 		key, err := br.ReadString('\n')
 		if err != nil {
@@ -127,7 +130,7 @@ func (n *Node) EnableHeadStore(put func(ownerHex string, val []byte) error, get 
 		defer s.Close()
 		owner, err := PeerPubKeyHex(s.Conn().RemotePeer())
 		var val []byte
-		if err == nil && get != nil {
+		if err == nil && get != nil && n.isFriend(s.Conn().RemotePeer()) {
 			val, _ = get(owner)
 		}
 		binary.Write(s, binary.BigEndian, uint32(len(val)))

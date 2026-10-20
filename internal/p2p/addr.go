@@ -75,7 +75,7 @@ func (n *Node) EnableAddrService(lookup func(subjectHex string) *AddrRecord) {
 		var rec *AddrRecord
 		if subject == self {
 			rec = n.SignedAddrRecord()
-		} else if lookup != nil {
+		} else if lookup != nil && n.isFriend(s.Conn().RemotePeer()) {
 			rec = lookup(subject)
 		}
 		var data []byte

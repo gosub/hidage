@@ -36,7 +36,11 @@ type Node struct {
 	id     identity.Identity
 	blobs  Blobs
 	hosted *hosting.Host // friends' data (EnableHosting); serves each requester its own
+	friend func(peer.ID) bool
 }
+
+// isFriend reports whether p may use friends-only protocols.
+func (n *Node) isFriend(p peer.ID) bool { return n.friend == nil || n.friend(p) }
 
 // lookup returns the object a requester may read: from the requester's own
 // hosted data when hosting is enabled, else from the node's blob store.
@@ -88,7 +92,7 @@ func New(id identity.Identity, blobs Blobs, listen []string, opts ...Option) (*N
 	if err != nil {
 		return nil, fmt.Errorf("start libp2p host: %w", err)
 	}
-	n := &Node{host: h, id: id, blobs: blobs}
+	n := &Node{host: h, id: id, blobs: blobs, friend: o.isFriend}
 	n.registerObjectHandler()
 	n.registerAuditHandler()
 	return n, nil
