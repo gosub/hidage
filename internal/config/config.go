@@ -40,6 +40,9 @@ type Paths struct {
 	FriendsPath string
 	// InvitesPath holds pending invitations (hashed tokens).
 	InvitesPath string
+	// IdentityPath caches the identity key so the daemon can host for friends
+	// without the passphrase (see keyring.SaveIdentity).
+	IdentityPath string
 }
 
 // Resolve computes the config paths without creating anything on disk.
@@ -54,12 +57,13 @@ func Resolve() (Paths, error) {
 	}
 	dir := filepath.Join(base, AppName)
 	return Paths{
-		Dir:         dir,
-		ConfigPath:  filepath.Join(dir, "config.toml"),
-		KeyringPath: filepath.Join(dir, "keyring.json"),
-		TrustPath:   filepath.Join(dir, "trust.json"),
-		FriendsPath: filepath.Join(dir, "friends.json"),
-		InvitesPath: filepath.Join(dir, "invites.json"),
+		Dir:          dir,
+		ConfigPath:   filepath.Join(dir, "config.toml"),
+		KeyringPath:  filepath.Join(dir, "keyring.json"),
+		TrustPath:    filepath.Join(dir, "trust.json"),
+		FriendsPath:  filepath.Join(dir, "friends.json"),
+		InvitesPath:  filepath.Join(dir, "invites.json"),
+		IdentityPath: filepath.Join(dir, "identity.key"),
 	}, nil
 }
 
@@ -85,9 +89,12 @@ type Settings struct {
 	// Listen is the list of multiaddrs the node listens on.
 	Listen []string `toml:"listen"`
 	// Reachability is "auto", "public" or "private" (see p2p.Reachability).
-	Reachability string  `toml:"reachability"`
-	Hosting      Hosting `toml:"hosting"`
-	Backup       Backup  `toml:"backup"`
+	Reachability string `toml:"reachability"`
+	// PassphraseCommand, if set, is run (via sh -c) to obtain the keyring
+	// passphrase on stdout, e.g. for an unattended daemon.
+	PassphraseCommand string  `toml:"passphrase_command"`
+	Hosting           Hosting `toml:"hosting"`
+	Backup            Backup  `toml:"backup"`
 }
 
 // Hosting configures what this node stores for friends.
@@ -223,6 +230,11 @@ listen = [%s]
 #   "public"  e.g. a port is forwarded: this node relays for friends behind NATs
 #   "private" behind a NAT: reserve a slot on a reachable friend's relay
 reachability = %q
+
+# Command printing the keyring passphrase, so "hidage daemon" can take backups
+# unattended, e.g. "systemd-creds decrypt ~/.config/hidage/pass.cred -" or
+# "pass show hidage". Empty: ask on the terminal (or use HIDAGE_PASSPHRASE).
+passphrase_command = ""
 
 [hosting]
 # Space granted to a newly added friend (change per friend with "hidage friend set").

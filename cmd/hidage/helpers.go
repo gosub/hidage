@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"strings"
 	"syscall"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -32,11 +34,22 @@ func startDir() string {
 	return "."
 }
 
-// readPassphrase obtains the passphrase from the environment or, failing that,
-// the terminal. When confirm is set the user is asked to type it twice.
+// readPassphrase obtains the passphrase from the environment, the configured
+// passphrase_command, or the terminal. When confirm is set (choosing a new
+// passphrase) the command is skipped and the user is asked to type it twice.
 func readPassphrase(confirm bool) (string, error) {
 	if env := os.Getenv(passphraseEnv); env != "" {
 		return env, nil
+	}
+	if settings, _ := config.Load(); settings.PassphraseCommand != "" && !confirm {
+		out, err := exec.Command("sh", "-c", settings.PassphraseCommand).Output()
+		if err != nil {
+			return "", fmt.Errorf("passphrase_command failed: %w", err)
+		}
+		if pass := strings.TrimRight(string(out), "\r\n"); pass != "" {
+			return pass, nil
+		}
+		return "", errors.New("passphrase_command printed nothing")
 	}
 	if !term.IsTerminal(int(os.Stdin.Fd())) {
 		return "", fmt.Errorf("no terminal for passphrase; set %s", passphraseEnv)

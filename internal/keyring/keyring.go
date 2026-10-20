@@ -11,6 +11,7 @@ import (
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -122,6 +123,32 @@ func Load(path, passphrase string) (*Keyring, error) {
 		return nil, errors.New("keyring public key does not match its root secret (file corrupted?)")
 	}
 	return k, nil
+}
+
+// SaveIdentity caches the identity seed at path (0600). It lets a node host,
+// relay for and answer audits from friends without the passphrase; it cannot
+// decrypt backups (the master key is not derivable from it), but whoever reads
+// it can act as this node towards friends, so keep it like an SSH key.
+func (k *Keyring) SaveIdentity(path string) error {
+	seed := k.Identity().Private.Seed()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(hex.EncodeToString(seed)+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// LoadIdentity reads an identity cached by SaveIdentity.
+func LoadIdentity(path string) (identity.Identity, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return identity.Identity{}, err
+	}
+	seed, err := hex.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil || len(seed) != ed25519.SeedSize {
+		return identity.Identity{}, errors.New("identity cache is corrupted")
+	}
+	return identity.FromSeed(seed), nil
 }
 
 // ErrNoPublicKey means the keyring predates the stored public key; unlocking it

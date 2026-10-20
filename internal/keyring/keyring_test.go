@@ -118,3 +118,19 @@ func TestPublicKeyWithoutUnlock(t *testing.T) {
 		t.Fatal("mismatched public key should fail to load")
 	}
 }
+
+func TestIdentityCache(t *testing.T) {
+	dir := t.TempDir()
+	kr, _ := Init(filepath.Join(dir, "keyring.json"), "pass")
+	p := filepath.Join(dir, "identity.key")
+	if err := kr.SaveIdentity(p); err != nil {
+		t.Fatal(err)
+	}
+	id, err := LoadIdentity(p)
+	if err != nil || !bytes.Equal(id.Public, kr.Identity().Public) {
+		t.Fatalf("LoadIdentity = %x, %v", id.Public, err)
+	}
+	if info, _ := os.Stat(p); info.Mode().Perm() != 0o600 {
+		t.Fatalf("identity cache mode %v", info.Mode().Perm())
+	}
+}
