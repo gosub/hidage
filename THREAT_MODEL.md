@@ -27,8 +27,8 @@ adversarial gaps** — honestly, so nothing is relied on that shouldn't be. See
   owner's backups can be found and trusted from their public key alone.
 - **Durability.** Reed-Solomon erasure coding spreads M shards across peers so any
   K reconstruct — surviving the loss of a minority. Proof-of-storage **audits**
-  detect peers that drop data; **reputation** steers future placement away from
-  them.
+  detect friends that drop data; `status` reports when that leaves the backup
+  without enough fault tolerance.
 
 ## Trust model — friends only
 
@@ -44,22 +44,15 @@ are listed for that case (see [`docs/friends-only.md`](docs/friends-only.md)).
 These are real and (mostly) unsolved. They affect availability/economics, **not**
 confidentiality or integrity.
 
-### Free-riding via the free quota
-`serve` extends every peer a `--free` quota (default 1 GiB) before requiring
-reciprocation. A node that serves stingily (`--ratio 0 --free 0`) but publishes
-widely can extract `free × (#hosts)` of storage for nothing. The free quota is a
-deliberate cold-start credit line (you can't bootstrap reciprocity without it);
-the cost is bounded free-riding. Tunable via `--free`, but there is no full fix in
-the open network.
+### Free-riding
+Each friend gets the space you give it (`friend set --give`), whether or not it gives
+you space back; `friend ls` shows both directions so imbalance is visible, and
+fixing it is a conversation, not a protocol.
 
 ### Sybil attacks
-Identities are costless, so an attacker can mint many and multiply the per-identity
-free quota — the dominant Sybil lever. What is **not** vulnerable: reputation and
-accounting are **local and self-written** (your view = your own audits; credit is
-only written by your own `publish`), so Sybils cannot inflate their standing with
-you or trick your `serve` into over-accepting beyond `free`. With the friends-only
-model (no DHT, inbound connections only from friends) Sybil identities have no way
-in: a new identity is useless until someone adds its contact card.
+Identities are costless, but with the friends-only model (no DHT, no free quota,
+inbound connections only from friends) a minted identity has no way in: it is
+useless until someone adds its contact card.
 
 ### Audit outsourcing
 The audit proves *someone* holds the bytes, not that *this* peer does. A lazy peer
@@ -70,19 +63,12 @@ objects can still be outsourced within the window. True proof-of-replication is 
 implemented.
 
 ### Accept-then-delete
-A peer can accept your shards (earning storage credit) then delete them. Audits
-catch this: a failed audit drops the peer's reputation *and* revokes its accounting
-credit with you, so it can no longer push to your `serve`. The catch is that
+A friend can accept your shards then delete them. Audits catch this: a failed audit
+is recorded against the friend and `status` flags it (and whether the backup is still
+rebuildable); the response is social, plus re-publishing. The catch is that
 detection is **only as frequent as you run `hidage audit`** — between audits, your
 redundancy can silently degrade. Mitigate by auditing on a schedule and publishing
 at `--redundancy` high enough to tolerate some silent loss.
-
-### Reputation recency
-Scores are **recency-weighted**: audit evidence decays exponentially (≈30-day
-half-life), so banked old passes can't mask a recent failure and a peer not
-audited in a long time fades back toward *unproven* (prompting a fresh audit).
-Residual: the half-life is a fixed constant, not adaptive to your audit cadence,
-and reputation is still only as current as your last `hidage audit`.
 
 ### Head-pointer rollback
 Head records are owner-signed and newest-wins across all reachable friends, but a
@@ -92,8 +78,14 @@ reached is stale.
 
 ### Denial of service
 Audits are cheap to send but force the holder to read+hash whole objects
-(asymmetric, spammable). Pushed junk under the free quota fills disks until the
-lease GC reclaims it. Neither is rate-limited yet.
+(asymmetric, spammable). A friend can fill the quota you give it with junk. Only
+friends can connect, so both are bounded by whom you add; neither is rate-limited yet.
+
+### Owner machine compromised
+Malware on an owner's machine (with the keyring unlocked) can publish garbage over its
+backups. Hosts keep replaced data in trash for `hosting.trash_days` before deleting it,
+and the owner can't empty a friend's trash remotely, so the old data survives long
+enough to notice. Recovering from trash is not automated yet.
 
 ## Assumptions
 
@@ -111,8 +103,7 @@ lease GC reclaims it. Neither is rate-limited yet.
   connect to.
 - **Backing up to strangers / a paid storage market** — there is no discovery of
   untrusted storage nodes and no pricing/payment/contract layer.
-- **Costly identities / global consensus reputation** — kept local and
-  Sybil-isolated instead.
+- **Costly identities / reputation systems** — unnecessary between friends.
 
 ## One-line summary
 

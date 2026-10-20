@@ -2,17 +2,16 @@
 
 `hidage` is a peer-to-peer, pseudonymous, distributed backup system. The goal: back up a
 file or folder by spreading **encrypted, erasure-coded shards** across a P2P network
-instead of a central server. Each node contributes more local disk than it consumes
-remotely (e.g. 2–4×), trading abundant local space for durable remote storage, while a
-reputation ledger tracks which hosts are reliable.
+instead of a central server: you store your friends' backups, they store yours, each
+within the space you give each other, and audits check that they still hold it.
 
 > **Status: networked + redundant.** The encrypted **versioned storage core**
 > (content-addressed repository with incremental snapshots, history, diff, prune)
 > distributes over **libp2p** between friends (direct, through a friend's relay, or hole-punched);
 > a snapshot is **erasure-coded** and its shards spread across your friends' nodes (any K of M
-> reconstruct, so it survives losing a minority); peers are kept honest by **proof-of-
-> storage audits** feeding a **reputation** score, and a **space-accounting** ledger
-> enforces the contribute-more-than-you-consume model. A backup is recoverable on a fresh
+> reconstruct, so it survives losing a minority); each friend keeps your data within the
+> space they give you, renewals send only what changed, and **proof-of-storage audits**
+> show whether they still hold it. A backup is recoverable on a fresh
 > machine from just the **recovery phrase + one friend's contact card**.
 
 ## How it works
@@ -86,7 +85,8 @@ hidage friend ls                  # list friends; `friend rm <name>` removes one
 # networking
 hidage serve                      # run a node: serve objects, accept pushes from friends
                                   #   only (connections from anyone else are refused),
-                                  #   within their space budget; leases reclaim un-renewed data
+                                  #   within the space you give each; replaced data is kept in
+                                  #   trash for a while, unrenewed backups expire
 hidage publish                    # erasure-code the latest snapshot and spread the shards
                                   #   across every reachable friend (--redundancy, --min-peers
                                   #   default to config.toml)
@@ -96,11 +96,9 @@ hidage net-restore ./out --all    # recover from your friends: resolve the accou
                                   #   gather K-of-M shards, rebuild, restore (--repo <name>
                                   #   for one; on a fresh machine add --from <friend's card>)
 
-# reputation, audits, accounting
-hidage audit --peer <addr>        # challenge peers to prove they hold your shards
-                                  #   (updates reputation; revokes credit on failure)
-hidage reputation                 # per-peer audit scores (recency-weighted)
-hidage accounting                 # bytes you store for peers vs. they store for you
+# audits
+hidage audit                      # challenge the friends holding this repo's shards to
+                                  #   prove they still have them (results in status, friend ls)
 ```
 
 - A tracked folder is one containing `.hidage/`; `snapshot` creates it on first use.
@@ -160,13 +158,13 @@ go test ./...
 Coverage includes: deterministic chunk encryption (determinism + wrong-key/corruption
 rejection), content-defined chunk stability under insertion, DAG round-trip / diff /
 reachability, the three stores (FS + hardlink cross-repo dedup and refcounted delete +
-keyed-store lease reap/renew), the keyring (deterministic derivation, wrong-pass,
+per-friend hosted sets: replacement, trash, lease expiry, quota by bytes held), the keyring (deterministic derivation, wrong-pass,
 recovery-code roundtrip), and the repository end to end — snapshot/restore, `.hidage`
 exclusion, incremental-delta accounting, history/diff, `--replace`, and forget + prune.
 Networking: two-node object transfer, push and inbound connections gated by the friend list,
 contact cards, a NATed node reached through a friend's relay, signed address records,
-signed head push/resolve (owner-only, newest wins), proof-of-storage audits, reputation (recency decay: stale reverts to unproven, a recent
-fail dominates banked passes), space accounting (ratio/free + revoke), the account manifest
+signed head push/resolve (owner-only, newest wins), proof-of-storage audits, push v2 (only missing objects sent, quota refusal, a friend can't
+read another's data), the account manifest
 (upsert/find/roundtrip), Reed-Solomon encode/decode (incl. decode from any K subset),
 deterministic pack build + reassemble below and above the shard threshold, a
 **cross-node recovery** test, and the **redundant-recovery** test (shards spread over 3
@@ -176,13 +174,12 @@ peers, one killed, full byte-identical recovery from the survivors).
 
 | Path | Responsibility |
 |---|---|
-| `cmd/hidage` | CLI: snapshot/restore/diff/prune, recovery-code/recover, id/friend, serve/publish/net-restore/net-list, audit/reputation/accounting |
+| `cmd/hidage` | CLI: snapshot/restore/diff/prune, recovery-code/recover, id/friend, serve/publish/net-restore/net-list, audit, status |
 | `internal/config` | `config.toml` settings, config + data-store path resolution (`HIDAGE_STORE`) |
 | `internal/keyring` | root secret (wrapped under passphrase) → master key + identity; BIP39 recovery code |
 | `internal/identity` | Ed25519 keypair derived from the keyring (libp2p peer key) |
 | `internal/friends` | friend list (key, nickname, addresses, quota) and `hidage1:` contact cards |
-| `internal/reputation` | per-peer audit pass/fail → recency-weighted (time-decayed), Laplace-smoothed score |
-| `internal/accounting` | per-peer space ledger + contribution-ratio enforcement |
+| `internal/hosting` | friends' data: per-friend sets, quota by bytes held, trash, lease expiry |
 | `internal/crypto` | Argon2id KEK, key wrap/unwrap, deterministic content-addressed seal |
 | `internal/store` | `Store`; `FSStore` (meta) + `HardlinkStore` (pooled, cross-repo dedup) + `KeyedStore` |
 | `internal/chunk` | content-defined chunking (FastCDC) |
@@ -232,13 +229,13 @@ peers, one killed, full byte-identical recovery from the survivors).
   replicates a snapshot's objects (bytes, DAG nodes, chunks) to friends and posts a
   **signed head pointer**; `net-restore` rebuilds a backup from the network with only the
   recovery phrase + one friend's contact card.
-- **Phase 4 — reputation + redundancy.** ✅ Done. Proof-of-storage **audits** (challenge a
-  peer to prove it still holds a shard, signed receipt) feed a per-peer **reputation**
-  score; a **space-accounting** ledger enforces the 2–4× contribution ratio on accepted
-  pushes; and a snapshot is **erasure-coded** (`internal/pack` + Reed-Solomon) into shards
+- **Phase 4 — audits + redundancy.** ✅ Done. Proof-of-storage **audits** (challenge a
+  peer to prove it still holds a shard, signed receipt), originally feeding reputation
+  scores and a contribution-ratio ledger (since replaced by per-friend quotas); and a
+  snapshot is **erasure-coded** (`internal/pack` + Reed-Solomon) into shards
   spread across peers, so it survives the loss of any minority of them.
 
 > A paid storage service is **only an idea, not a planned feature.** The chosen
 > primitives (signed pubkey identities + friend list, content-addressed verifiable
-> shards, audit-backed reputation) are deliberately enough to make one *possible* later
+> shards, audit-backed health checks) are deliberately enough to make one *possible* later
 > without any market-specific work in scope today.

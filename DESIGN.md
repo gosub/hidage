@@ -272,9 +272,23 @@ them, rebuilds the objects, and runs the ordinary restore walk against a local c
 
 ---
 
-## Durability: audits, reputation, accounting, erasure coding
+## Durability: hosting, audits, erasure coding
 
-These keep distributed data recoverable and keep peers honest.
+These keep distributed data recoverable and make problems visible.
+
+- **Hosted sets** (`internal/hosting`, push protocol `/hidage/push/2.0.0`) — a node keeps
+  each friend's data in that friend's own directory. An owner publishes a repository by
+  replacing its **set** on each friend (the set id is an HMAC of the repo id under the
+  master key, so hosts can't link it to the repo): it lists the set's objects with their
+  sizes, the host answers which ones it lacks and whether the result fits, only those are
+  sent, and the host commits the new list. Renewing an unchanged backup therefore sends
+  only the list. The **quota** is the space the host gives that friend (`friend set
+  --give`), checked against the bytes the friend would actually hold afterwards, so
+  repeated renewals never inflate it. Objects no set lists any more move to a per-friend
+  **trash** and are deleted after `hosting.trash_days`, so a compromised owner machine that
+  publishes garbage can't wipe its remote copies at once. A set not renewed within
+  `hosting.lease_days` is dropped (its owner has gone away). Object and audit requests are
+  answered from the requester's own data, live or in trash.
 
 - **Proof-of-storage audits** (`/hidage/audit/1.0.0`, `internal/p2p`) — a node that holds
   the original challenges a peer with a shard id + fresh random nonce; the peer must return
@@ -282,28 +296,8 @@ These keep distributed data recoverable and keep peers honest.
   within a short response **deadline** (a soft defense against fetching the shard from
   elsewhere on demand). The challenger verifies the proof and signature. `publish` records
   which shards went to which peer (`.hidage/distribution.json`); `audit` regenerates the
-  shards deterministically and samples each peer's assigned shards. A failed audit lowers
-  reputation **and revokes that peer's accounting credit** (so accept-then-delete costs it
-  its storage budget with you).
-
-- **Reputation** (`internal/reputation`) — audit outcomes accumulate per peer into a
-  **recency-weighted** (exponential decay, ~30-day half-life), Laplace-smoothed pass rate,
-  kept **local and self-written** (your view = your own audits; not gossiped, so Sybils
-  can't inject standing). Decay means recent audits dominate: banked old passes can't mask
-  a recent failure, and a peer not audited in a long time fades back toward *unproven*. The
-  scores are shown by `status` and `reputation`; they no longer gate placement (friends
-  are chosen by the user).
-
-- **Space accounting** (`internal/accounting`) — a per-peer ledger of bytes stored *for
-  them* vs. *by them*. On accepting a push, a node enforces a contribution ratio: it stores
-  for a peer at most `ratio × what they store for us + a free quota` (defaults 3×, 1 GiB).
-  `TheyStoreForUs` is only ever written by your own `publish`, so it can't be spoofed. This
-  is the mechanism behind "contribute 2–4× to consume 1×".
-
-- **Storage leases** (`serve --lease`, `store.KeyedStore.Reap`) — hosted shards carry a
-  lease (file mtime); a node periodically reclaims any not renewed within the window. A
-  re-publish rewrites the same (deterministic) shard ids, refreshing their leases, so an
-  owner who keeps publishing keeps their data and one who abandons it is reclaimed.
+  published release deterministically and samples each friend's assigned shards. The
+  outcome is kept per friend in `friends.json` and shown by `status` and `friend ls`.
 
 - **Erasure-coded redundancy** (`internal/shard`, `internal/pack`) — objects are grouped
   into ≤8 MiB **packs**; each pack is Reed-Solomon coded (`klauspost/reedsolomon`) into M
@@ -344,8 +338,9 @@ explicitly marked out of scope:
   connections and pushes.
 - **Disaster recovery** — ✅ *implemented* (see below): recover from the network with only
   the recovery phrase + one friend's contact card.
-- **Reputation, audits, accounting** — ✅ *implemented* (`internal/reputation`,
-  `internal/accounting`, audit protocol; see "Durability" above).
+- **Hosting, audits** — ✅ *implemented* (`internal/hosting`, audit protocol; see
+  "Durability" above). The earlier reputation scores and contribution-ratio ledger were
+  removed: between friends, a stated quota and the last audit result say more.
 - **Erasure-coded redundancy** — ✅ *implemented* (`internal/shard` Reed-Solomon +
   `internal/pack`; see "Durability" above).
 - **Storage from strangers / storage market** — *removed / out of scope.* hidage backs up
