@@ -114,3 +114,87 @@ func safeJoin(dir, name string) (string, error) {
 	}
 	return target, nil
 }
+
+// RestorePath restores one file or directory of a snapshot into outDir (under
+// its own base name). path is relative to the snapshot's folder, with "/"
+// separators; "" or "." restores the whole snapshot like RestoreWith.
+func RestorePath(l *dag.Loader, snap *Snapshot, path, outDir string) error {
+	if cleanPath(path) == "" {
+		return RestoreWith(l, snap, outDir)
+	}
+	if err := snap.Verify(); err != nil {
+		return err
+	}
+	e, err := findEntry(l, snap, path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return fmt.Errorf("create out dir: %w", err)
+	}
+	return materialize(l, e, outDir)
+}
+
+// List returns the entries of a directory in a snapshot (path relative to the
+// snapshot's folder; "" for its top level), or the entry itself for a file.
+func List(l *dag.Loader, snap *Snapshot, path string) ([]dag.Entry, error) {
+	e, err := findEntry(l, snap, path)
+	if err != nil {
+		return nil, err
+	}
+	if e.Kind != dag.KindTree {
+		return []dag.Entry{e}, nil
+	}
+	t, err := l.Tree(e.Ref)
+	if err != nil {
+		return nil, err
+	}
+	return t.Entries, nil
+}
+
+// findEntry walks path (relative to the snapshot's folder) down from the root.
+func findEntry(l *dag.Loader, snap *Snapshot, path string) (dag.Entry, error) {
+	root, err := l.Tree(snap.Root)
+	if err != nil {
+		return dag.Entry{}, err
+	}
+	if len(root.Entries) != 1 {
+		return dag.Entry{}, fmt.Errorf("snapshot root has %d entries, want 1", len(root.Entries))
+	}
+	e := root.Entries[0]
+	path = cleanPath(path)
+	if path == "" {
+		return e, nil
+	}
+	for _, part := range strings.Split(path, "/") {
+		if e.Kind != dag.KindTree {
+			return dag.Entry{}, fmt.Errorf("%s: not a directory in this snapshot", path)
+		}
+		t, err := l.Tree(e.Ref)
+		if err != nil {
+			return dag.Entry{}, err
+		}
+		found := false
+		for _, c := range t.Entries {
+			if c.Name == part {
+				e, found = c, true
+				break
+			}
+		}
+		if !found {
+			return dag.Entry{}, fmt.Errorf("%s: no such file or directory in this snapshot", path)
+		}
+	}
+	return e, nil
+}
+
+func cleanPath(p string) string {
+	p = strings.Trim(filepath.ToSlash(filepath.Clean("/"+p)), "/")
+	if p == "." {
+		return ""
+	}
+	return p
+}
+
+// Loader returns a loader over this repository's local stores.
+func (r *Repo) Loader() *dag.Loader { return dag.NewLoader(r.meta, r.data, r.masterKey) }

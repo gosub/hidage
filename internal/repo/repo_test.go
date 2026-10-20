@@ -313,3 +313,38 @@ func TestSnapshotIfChanged(t *testing.T) {
 		t.Fatalf("%d snapshots, want 2", len(snaps))
 	}
 }
+
+func TestRestorePathAndList(t *testing.T) {
+	r, priv, _ := newRepo(t)
+	snap, _, err := r.Snapshot(priv, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := r.Loader()
+	out := t.TempDir()
+	if err := RestorePath(l, snap, "sub/b.txt", out); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(out, "b.txt")); err != nil || string(got) != "bravo" {
+		t.Fatalf("b.txt = %q, %v", got, err)
+	}
+	if err := RestorePath(l, snap, "sub", out); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(out, "sub", "c.txt")); string(got) != "charlie" {
+		t.Fatalf("sub/c.txt = %q", got)
+	}
+	if err := RestorePath(l, snap, "nope", out); err == nil {
+		t.Fatal("missing path restored")
+	}
+	if err := RestorePath(l, snap, "a.txt/x", out); err == nil {
+		t.Fatal("path through a file restored")
+	}
+	entries, err := List(l, snap, "")
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("List top = %d entries, %v", len(entries), err)
+	}
+	if entries, _ := List(l, snap, "sub"); len(entries) != 2 {
+		t.Fatalf("List sub = %d entries", len(entries))
+	}
+}
