@@ -118,8 +118,10 @@ hidage audit                      # challenge the friends holding this repo's sh
   (master key + identity). Keep it offline — anyone with it can decrypt your backups, and
   it's the only way to get your key back if you lose this machine. `hidage recover` reads
   the phrase from stdin and rebuilds the keyring (under a new passphrase). With the phrase
-  plus one friend's contact card (`--from`), `hidage net-restore` rebuilds the snapshots and files from the
-  network — no local `.hidage` or chunk store needed.
+  plus one friend's contact card (`--from`), `hidage net-restore` rebuilds the files from
+  your friends — no local `.hidage` or chunk store needed. It also restores your friend list
+  (kept encrypted in your backup) and makes each folder its repository again, so `hidage
+  publish` resumes where you left off.
 
 ## End-to-end demo
 

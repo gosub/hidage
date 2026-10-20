@@ -385,6 +385,14 @@ The three things this needs — all now in place:
    code) to locate the head, and the manifest enumerates every repository — no snapshot or
    repo id to remember.
 
+**Recovery continuity.** The account manifest also carries the owner's **friend list**,
+sealed under a key derived from the master key (`account.SetRoster`), so friends can't
+read it. A new machine that reaches one friend (`--from`) learns all the others from it and
+asks them too. Each restored folder is then **adopted** (`repo.Adopt`): `.hidage/` is
+rebuilt with the original repo id, the signed snapshot byte for byte, and its DAG nodes and
+chunks, so a re-publish regenerates identical shards and only renews what friends already
+hold. `--files-only` restores files without adopting.
+
 **Minimal recovery seed.** Recovering an arbitrarily large dataset needs only a tiny
 off-machine secret plus a way onto the network: the **24-word recovery phrase** (which
 reproduces both the master key and the identity) and one **friend's contact card**
