@@ -14,10 +14,14 @@ import (
 	"hidage/internal/config"
 )
 
+// version is set at release time with -ldflags "-X main.buildVersion=v1.2.3".
+var buildVersion = "dev"
+
 func main() {
 	root := &cobra.Command{
 		Use:           "hidage",
 		Short:         "hidage: encrypted, versioned backups with your friends",
+		Version:       buildVersion,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
