@@ -459,3 +459,33 @@ func TestPairAndFriendsOnlyHandlers(t *testing.T) {
 		t.Fatalf("friend's head record refused after pairing: %v", err)
 	}
 }
+
+func TestPushEntriesFetchesOnlyMissing(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	s, _ := newHostNode(t, 1<<20)
+	a, _ := newNodeID(t, nil)
+	a.Connect(ctx, s.Addrs()[0])
+	objs := map[string][]byte{}
+	var entries []hosting.Entry
+	for _, w := range []string{"one", "two", "three"} {
+		objs[store.ID([]byte(w))] = []byte(w)
+		entries = append(entries, hosting.Entry{ID: store.ID([]byte(w)), Size: int64(len(w))})
+	}
+	if _, err := a.PushSet(ctx, s.ID(), testSet, map[string][]byte{entries[0].ID: objs[entries[0].ID]}); err != nil {
+		t.Fatal(err)
+	}
+	var asked []string
+	res, err := a.PushEntries(ctx, s.ID(), testSet, entries, func(id string) ([]byte, error) {
+		asked = append(asked, id)
+		return objs[id], nil
+	})
+	if err != nil || res.Sent != 2 || len(asked) != 2 {
+		t.Fatalf("push = %+v, %v; asked for %d objects, want 2", res, err, len(asked))
+	}
+	for _, id := range asked {
+		if id == entries[0].ID {
+			t.Fatal("asked for an object the host already had")
+		}
+	}
+}

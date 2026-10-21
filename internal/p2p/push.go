@@ -182,28 +182,38 @@ func (n *Node) handlePush(s network.Stream, owner string, give int64) error {
 // PushSet makes objs the content of the sender's set setID on peer p,
 // transferring only what p lacks.
 func (n *Node) PushSet(ctx context.Context, p peer.ID, setID string, objs map[string][]byte) (*PushResult, error) {
+	entries := make([]hosting.Entry, 0, len(objs))
+	for id, data := range objs {
+		entries = append(entries, hosting.Entry{ID: id, Size: int64(len(data))})
+	}
+	return n.PushEntries(ctx, p, setID, entries, func(id string) ([]byte, error) { return objs[id], nil })
+}
+
+// PushEntries is PushSet for sets described by id and size: get is called only
+// for the objects p lacks, so data that is expensive to produce (e.g. shards of
+// an older release, rebuilt on demand) is produced only when needed.
+func (n *Node) PushEntries(ctx context.Context, p peer.ID, setID string, entries []hosting.Entry, get func(id string) ([]byte, error)) (*PushResult, error) {
 	s, err := n.host.NewStream(ctx, p, PushProtocol)
 	if err != nil {
 		return nil, fmt.Errorf("open push stream: %w", err)
 	}
 	defer s.Close()
 
-	ids := make([]string, 0, len(objs))
-	for id := range objs {
-		if len(id) > maxIDLen {
-			return nil, fmt.Errorf("object id too long: %q", id)
+	entries = append([]hosting.Entry(nil), entries...)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
+	for _, e := range entries {
+		if len(e.ID) > maxIDLen {
+			return nil, fmt.Errorf("object id too long: %q", e.ID)
 		}
-		ids = append(ids, id)
 	}
-	sort.Strings(ids)
 
 	bw := bufio.NewWriter(s)
 	bw.WriteString(setID + "\n")
-	binary.Write(bw, binary.BigEndian, uint32(len(ids)))
-	for _, id := range ids {
-		bw.WriteByte(uint8(len(id)))
-		bw.WriteString(id)
-		binary.Write(bw, binary.BigEndian, uint64(len(objs[id])))
+	binary.Write(bw, binary.BigEndian, uint32(len(entries)))
+	for _, e := range entries {
+		bw.WriteByte(uint8(len(e.ID)))
+		bw.WriteString(e.ID)
+		binary.Write(bw, binary.BigEndian, uint64(e.Size))
 	}
 	if err := bw.Flush(); err != nil {
 		return nil, err
@@ -214,7 +224,7 @@ func (n *Node) PushSet(ctx context.Context, p peer.ID, setID string, objs map[st
 	if _, err := io.ReadFull(br, hdr[:]); err != nil {
 		return nil, fmt.Errorf("read push reply: %w", err)
 	}
-	res := &PushResult{Objects: len(ids), Held: int64(binary.BigEndian.Uint64(hdr[1:9])), Give: int64(binary.BigEndian.Uint64(hdr[9:]))}
+	res := &PushResult{Objects: len(entries), Held: int64(binary.BigEndian.Uint64(hdr[1:9])), Give: int64(binary.BigEndian.Uint64(hdr[9:]))}
 	switch hdr[0] {
 	case pushNotFriend:
 		return nil, ErrNotFriend
@@ -228,7 +238,7 @@ func (n *Node) PushSet(ctx context.Context, p peer.ID, setID string, objs map[st
 	if err := binary.Read(br, binary.BigEndian, &nMissing); err != nil {
 		return nil, err
 	}
-	if nMissing > uint32(len(ids)) {
+	if nMissing > uint32(len(entries)) {
 		return nil, errors.New("host asked for more objects than the set has")
 	}
 	missing := make([]uint32, nMissing)
@@ -236,10 +246,16 @@ func (n *Node) PushSet(ctx context.Context, p peer.ID, setID string, objs map[st
 		return nil, err
 	}
 	for _, i := range missing {
-		if int(i) >= len(ids) {
+		if int(i) >= len(entries) {
 			return nil, errors.New("host asked for an object outside the set")
 		}
-		data := objs[ids[i]]
+		data, err := get(entries[i].ID)
+		if err != nil {
+			return nil, fmt.Errorf("object %s: %w", entries[i].ID, err)
+		}
+		if int64(len(data)) != entries[i].Size {
+			return nil, fmt.Errorf("object %s: %d bytes, declared %d", entries[i].ID, len(data), entries[i].Size)
+		}
 		if _, err := bw.Write(data); err != nil {
 			return nil, err
 		}

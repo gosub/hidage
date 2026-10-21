@@ -35,6 +35,7 @@ const boundaryMask = 0x07
 type ShardRef struct {
 	ID    string `json:"id"`
 	Index int    `json:"index"`
+	Size  int64  `json:"size"` // bytes, so a set can be described without the data at hand
 }
 
 // PackDesc describes one erasure-coded pack.
@@ -68,7 +69,7 @@ func Build(objects map[string][]byte, redundancy float64, snapshotID string) (*R
 		for _, s := range shards {
 			id := hashID(s.Data)
 			shardBlobs[id] = s.Data
-			desc.Shards = append(desc.Shards, ShardRef{ID: id, Index: s.Index})
+			desc.Shards = append(desc.Shards, ShardRef{ID: id, Index: s.Index, Size: int64(len(s.Data))})
 		}
 		rel.Packs = append(rel.Packs, desc)
 	}
