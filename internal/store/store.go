@@ -12,6 +12,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"hidage/internal/fsx"
 )
 
 // ErrNotFound is returned by Get/Delete when no shard with the given ID exists.
@@ -98,7 +100,7 @@ func (s *FSStore) Has(id string) (bool, error) {
 
 // Delete implements Store.
 func (s *FSStore) Delete(id string) error {
-	err := os.Remove(s.path(id))
+	err := fsx.Remove(s.path(id))
 	if errors.Is(err, fs.ErrNotExist) {
 		return ErrNotFound
 	}

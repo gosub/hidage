@@ -8,7 +8,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"syscall"
+	"sync"
+
+	"hidage/internal/fsx"
 )
 
 // HardlinkStore is a content-addressed store that deduplicates blobs across
@@ -17,8 +19,8 @@ import (
 // namespace (refs/<namespace>/). The filesystem's link count acts as a
 // cross-repository reference count, so a repository can prune its own links
 // safely: a blob's disk space is reclaimed only when the last repository
-// referencing it unlinks. The pool and the namespaces must live on one Unix
-// filesystem (hard links can't span filesystems).
+// referencing it unlinks. The pool and the namespaces must live on one
+// filesystem that supports hard links (they can't span filesystems).
 type HardlinkStore struct {
 	pool string // <root>/pool
 	refs string // <root>/refs/<namespace>
@@ -26,6 +28,12 @@ type HardlinkStore struct {
 
 // NewHardlinkStore opens a store under root for namespace (the repository ID).
 func NewHardlinkStore(root, namespace string) (*HardlinkStore, error) {
+	if err := fsx.MkdirPrivate(root); err != nil {
+		return nil, fmt.Errorf("create %s: %w", root, err)
+	}
+	if err := CheckHardLinks(root); err != nil {
+		return nil, err
+	}
 	s := &HardlinkStore{
 		pool: filepath.Join(root, "pool"),
 		refs: filepath.Join(root, "refs", namespace),
@@ -94,7 +102,7 @@ func (s *HardlinkStore) Has(id string) (bool, error) {
 // blob anymore (only the pool's own link remains), removes the pooled copy too.
 func (s *HardlinkStore) Delete(id string) error {
 	rp := s.refPath(id)
-	if err := os.Remove(rp); err != nil {
+	if err := fsx.Remove(rp); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return ErrNotFound
 		}
@@ -109,7 +117,7 @@ func (s *HardlinkStore) Delete(id string) error {
 		return err
 	}
 	if n <= 1 { // only the pool link remains; nothing references it
-		if err := os.Remove(pp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := fsx.Remove(pp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	}
@@ -141,10 +149,44 @@ func writeAtomic(path string, data []byte) error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := fsx.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err
 	}
+	return nil
+}
+
+// linkChecked remembers the store roots whose filesystem passed CheckHardLinks.
+var linkChecked sync.Map
+
+// ErrNoHardLinks means the data store is on a filesystem without hard links,
+// such as FAT32 or exFAT, which the store's reference counting needs.
+var ErrNoHardLinks = errors.New("filesystem does not support hard links")
+
+// CheckHardLinks verifies, once per process and root, that files under root
+// can be hard-linked and that the link count is reported.
+func CheckHardLinks(root string) error {
+	if _, ok := linkChecked.Load(root); ok {
+		return nil
+	}
+	a := filepath.Join(root, ".linkcheck-"+randHex())
+	b := a + "-2"
+	defer os.Remove(a)
+	defer os.Remove(b)
+	if err := os.WriteFile(a, nil, 0o600); err != nil {
+		return fmt.Errorf("data store %s: %w", root, err)
+	}
+	fail := func(cause error) error {
+		return fmt.Errorf("data store %s: %w (%v); put it on NTFS, APFS, ext4 or another "+
+			"filesystem with hard links, using `store` in config.toml or HIDAGE_STORE", root, ErrNoHardLinks, cause)
+	}
+	if err := os.Link(a, b); err != nil {
+		return fail(err)
+	}
+	if n, err := linkCount(a); err != nil || n != 2 {
+		return fail(fmt.Errorf("link count %d, %v", n, err))
+	}
+	linkChecked.Store(root, true)
 	return nil
 }
 
@@ -152,17 +194,4 @@ func randHex() string {
 	b := make([]byte, 8)
 	rand.Read(b)
 	return hex.EncodeToString(b)
-}
-
-// linkCount returns the number of hard links to the file at path.
-func linkCount(path string) (uint64, error) {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return 0, err
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, fmt.Errorf("hardlink store requires a Unix filesystem")
-	}
-	return uint64(st.Nlink), nil
 }

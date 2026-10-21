@@ -21,6 +21,7 @@ import (
 	bip39 "github.com/tyler-smith/go-bip39"
 
 	"hidage/internal/crypto"
+	"hidage/internal/fsx"
 	"hidage/internal/identity"
 )
 
@@ -135,7 +136,7 @@ func (k *Keyring) SaveIdentity(path string) error {
 	if err := os.WriteFile(tmp, []byte(hex.EncodeToString(seed)+"\n"), 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return fsx.Rename(tmp, path)
 }
 
 // LoadIdentity reads an identity cached by SaveIdentity.

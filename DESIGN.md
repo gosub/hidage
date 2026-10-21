@@ -43,8 +43,11 @@ hidage uses **two** implementations:
   cross-repository reference count: a repo prunes by unlinking only its own refs, and a
   blob's disk space is reclaimed only when the **last** repo unlinks it (the pool link is
   the sole remaining one). This deduplicates identical chunks across every folder while
-  keeping prune safe and registry-free. It requires the pool and refs to share one Unix
-  filesystem (hard links can't span filesystems).
+  keeping prune safe and registry-free. It requires the pool and refs to share one
+  filesystem with hard links (they can't span filesystems): ext4, APFS and NTFS work;
+  FAT32 and exFAT don't, and opening the store checks this once by linking a test file.
+  On Windows the link count comes from `GetFileInformationByHandle`, and NTFS allows
+  1024 links per file, so one chunk can be shared by up to 1023 folders.
 
 The shared `Put/Get/Has/Delete/List` interface is also the seam a libp2p-backed network
 store will implement in Phase 3.
@@ -293,11 +296,32 @@ publishes when the snapshot changed or the last publish is older than `renew_eve
 older than `audit_every`.
 
 Backups need the master key; hosting needs only the identity key. The passphrase comes
-from `HIDAGE_PASSPHRASE`, `passphrase_command` or the terminal; on every unlock the daemon
+from `HIDAGE_PASSPHRASE`, `passphrase_command` (run with `sh -c`, or `cmd /C` on Windows),
+the OS password store (Windows Credential Manager, the macOS Keychain or the Linux Secret
+Service, where `daemon --install` offers to save it), or the terminal. A saved passphrase
+that no longer unlocks the keyring is removed from the store. On every unlock the daemon
 caches the identity seed in `identity.key` (0600). A later start with no passphrase source
 (e.g. at boot) runs **locked** from that cache: it keeps hosting for friends but takes no
 backups, and records this in `node.json` so `status` can say so. `daemon --install` writes a
-systemd user unit or launchd agent.
+systemd user unit, a launchd agent, or a Task Scheduler definition (a logon task running
+`conhost --headless`, so no console window opens, and logging to `daemon.log`).
+
+### Platform differences
+
+- **Permissions.** Unix modes (0600 files, 0700 folders) protect keys and data. Windows
+  ignores them, so the config folder and the data store get an access list granting only
+  the current user and SYSTEM when they are created (`fsx.MakePrivate`).
+- **Open files.** Windows can't rename over or remove a file another process has open, and
+  antivirus and the indexer open files briefly; every rename and removal goes through
+  `fsx`, which retries sharing violations for up to 2 s.
+- **Unreadable files** (locked, no permission, gone mid-backup) are left out of a snapshot
+  and listed, on every OS, and the list is kept in `.hidage/unreadable.json` for `status`.
+  Online-only placeholders (OneDrive files on demand, evicted iCloud Drive files) are
+  skipped rather than downloaded.
+- **Names on restore.** On Windows, names with `\ : * ? " < > |`, control characters, a
+  trailing dot or space, or a device name such as `CON` are restored with those characters
+  as `%XX`; on Windows and macOS, names that differ only by case get a ` (2)` suffix.
+  Restore lists every renamed path. Snapshots always store the original names.
 
 ## Durability: hosting, audits, erasure coding
 

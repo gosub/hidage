@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -130,7 +131,8 @@ func TestIdentityCache(t *testing.T) {
 	if err != nil || !bytes.Equal(id.Public, kr.Identity().Public) {
 		t.Fatalf("LoadIdentity = %x, %v", id.Public, err)
 	}
-	if info, _ := os.Stat(p); info.Mode().Perm() != 0o600 {
+	// Windows has no mode bits; there the config folder's access list protects it.
+	if info, _ := os.Stat(p); runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("identity cache mode %v", info.Mode().Perm())
 	}
 }

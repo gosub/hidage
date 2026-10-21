@@ -10,11 +10,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"hidage/internal/fsx"
 )
 
 // AppName is the directory name used under the user's config and data roots.
@@ -49,6 +52,9 @@ type Paths struct {
 // Resolve computes the config paths without creating anything on disk.
 func Resolve() (Paths, error) {
 	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" && runtime.GOOS == "windows" {
+		base = os.Getenv("APPDATA")
+	}
 	if base == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -74,10 +80,20 @@ func Ensure() (Paths, error) {
 	if err != nil {
 		return Paths{}, err
 	}
-	if err := os.MkdirAll(p.Dir, 0o700); err != nil {
+	if err := fsx.MkdirPrivate(p.Dir); err != nil {
 		return Paths{}, fmt.Errorf("create config dir: %w", err)
 	}
 	return p, nil
+}
+
+// EnsureDataStore creates the data store directory, private to the current
+// user, and returns its path.
+func EnsureDataStore() (string, error) {
+	dir := DataStoreDir()
+	if err := fsx.MkdirPrivate(dir); err != nil {
+		return "", fmt.Errorf("create data store: %w", err)
+	}
+	return dir, nil
 }
 
 // Settings is the content of config.toml. Every field has a default, so a
@@ -91,8 +107,8 @@ type Settings struct {
 	Listen []string `toml:"listen"`
 	// Reachability is "auto", "public" or "private" (see p2p.Reachability).
 	Reachability string `toml:"reachability"`
-	// PassphraseCommand, if set, is run (via sh -c) to obtain the keyring
-	// passphrase on stdout, e.g. for an unattended daemon.
+	// PassphraseCommand, if set, is run (via sh -c, or cmd /C on Windows) to
+	// obtain the keyring passphrase on stdout, e.g. for an unattended daemon.
 	PassphraseCommand string    `toml:"passphrase_command"`
 	Hosting           Hosting   `toml:"hosting"`
 	Backup            Backup    `toml:"backup"`
@@ -196,7 +212,7 @@ func reset() { loadOnce = sync.Once{} }
 
 // DataStoreDir returns the node-wide chunk store path: $HIDAGE_STORE if set,
 // else the config file's store, else the legacy /opt location if it exists,
-// else $XDG_DATA_HOME/hidage/store.
+// else $XDG_DATA_HOME/hidage/store (%LocalAppData%\hidage\store on Windows).
 func DataStoreDir() string {
 	if v := os.Getenv(DataStoreEnv); v != "" {
 		return v
@@ -204,14 +220,19 @@ func DataStoreDir() string {
 	if s, _ := Load(); s.Store != "" {
 		return expandHome(s.Store)
 	}
-	if _, err := os.Stat(LegacyDataStore); err == nil {
-		return LegacyDataStore
+	if runtime.GOOS != "windows" {
+		if _, err := os.Stat(LegacyDataStore); err == nil {
+			return LegacyDataStore
+		}
 	}
 	return defaultDataStore()
 }
 
 func defaultDataStore() string {
 	base := os.Getenv("XDG_DATA_HOME")
+	if base == "" && runtime.GOOS == "windows" {
+		base = os.Getenv("LOCALAPPDATA")
+	}
 	if base == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -222,9 +243,10 @@ func defaultDataStore() string {
 	return filepath.Join(base, AppName, "store")
 }
 
-// expandHome expands a leading "~/" to the user's home directory.
+// expandHome expands a leading "~/" (or `~\` on Windows) to the user's home
+// directory.
 func expandHome(p string) string {
-	if len(p) >= 2 && p[:2] == "~/" {
+	if len(p) >= 2 && p[0] == '~' && (p[1] == '/' || p[1] == filepath.Separator) {
 		if home, err := os.UserHomeDir(); err == nil {
 			return filepath.Join(home, p[2:])
 		}
@@ -271,8 +293,10 @@ listen = [%s]
 reachability = %q
 
 # Command printing the keyring passphrase, so "hidage daemon" can take backups
-# unattended, e.g. "systemd-creds decrypt ~/.config/hidage/pass.cred -" or
-# "pass show hidage". Empty: ask on the terminal (or use HIDAGE_PASSPHRASE).
+# unattended, e.g. "pass show hidage" (run with sh -c, or cmd /C on Windows).
+# Usually not needed: "hidage daemon --install" offers to save the passphrase
+# in the OS password store instead. Empty: use the password store if it holds
+# the passphrase, else ask on the terminal (or use HIDAGE_PASSPHRASE).
 passphrase_command = ""
 
 [hosting]

@@ -57,7 +57,7 @@ func newStatusCmd() *cobra.Command {
 
 			switch st, running := runningNode(); {
 			case running && st.Locked:
-				warn("the daemon is running but locked: it hosts for friends but takes no backups (set passphrase_command)")
+				warn("the daemon is running but locked: it hosts for friends but takes no backups (run `hidage daemon --install` to save the passphrase, or set passphrase_command)")
 			case running && scheduled:
 				fmt.Printf("  daemon:        running, backs this folder up every %s\n", settings.Backup.Every)
 			case running:
@@ -74,6 +74,10 @@ func newStatusCmd() *cobra.Command {
 			latest := snaps[len(snaps)-1]
 			fmt.Printf("  snapshots:     %d (latest %s, %s ago)\n",
 				len(snaps), latest.ID[:12], humanAge(time.Since(latest.CreatedAt)))
+			if n := len(r.LastUnreadable()); n > 0 {
+				fmt.Printf("  unreadable:    %d file%s left out of the last backup (`hidage backup` lists them)\n",
+					n, plural(n, "", "s"))
+			}
 
 			dist, err := readDistribution(r.HidageFile("distribution.json"))
 			if err != nil {

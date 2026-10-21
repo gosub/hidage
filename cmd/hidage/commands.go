@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -77,6 +78,13 @@ The folder is also added to the folders "hidage daemon" keeps backed up (unless
 					n, plural(n, "y", "ies"))
 				for _, p := range stats.Skipped {
 					fmt.Printf("  %s\n", p)
+				}
+			}
+			if n := len(stats.Unreadable); n > 0 {
+				fmt.Printf("WARNING: %d file%s could not be read and %s not backed up:\n",
+					n, plural(n, "", "s"), plural(n, "is", "are"))
+				for _, u := range stats.Unreadable {
+					fmt.Printf("  %s (%s)\n", u.Path, u.Reason)
 				}
 			}
 			if !local && !once {
@@ -195,7 +203,7 @@ Snapshot ids may be shortened to any unambiguous prefix.`,
 				return errors.New("say where to restore with --to <dir> (or use --list to look first)")
 			}
 			// Refuse to overwrite unless asked.
-			dest := filepath.Join(to, filepath.Base(path))
+			dest := filepath.Join(to, repo.PortableName(path[strings.LastIndex(path, "/")+1:])) // snapshot paths use "/"
 			if path == "" {
 				name, err := repo.RootName(l, snap)
 				if err != nil {
@@ -206,9 +214,11 @@ Snapshot ids may be shortened to any unambiguous prefix.`,
 			if _, err := os.Stat(dest); err == nil && !force {
 				return fmt.Errorf("%s already exists; restore somewhere else or pass --force to overwrite", dest)
 			}
-			if err := repo.RestorePath(l, snap, path, to); err != nil {
+			rs := &repo.Restorer{Loader: l}
+			if err := rs.Path(snap, path, to); err != nil {
 				return err
 			}
+			defer printRenamed(rs.Renamed)
 			if path == "" {
 				fmt.Printf("Restored snapshot %s into %s\n", snap.ID[:12], dest)
 			} else {

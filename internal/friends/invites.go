@@ -10,6 +10,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"hidage/internal/fsx"
 )
 
 // Invite is a pending invitation created by `hidage friend invite`. Only a hash
@@ -64,7 +66,7 @@ func (iv *Invites) save(m map[string]Invite) error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, iv.path)
+	return fsx.Rename(tmp, iv.path)
 }
 
 // Create records a new invitation valid for ttl and returns its token.

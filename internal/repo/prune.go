@@ -2,9 +2,9 @@ package repo
 
 import (
 	"fmt"
-	"os"
 
 	"hidage/internal/dag"
+	"hidage/internal/fsx"
 	"hidage/internal/store"
 )
 
@@ -21,10 +21,10 @@ func (r *Repo) Forget(id string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(r.snapshotPath(snap.ID)); err != nil {
+	if err := fsx.Remove(r.snapshotPath(snap.ID)); err != nil {
 		return fmt.Errorf("remove snapshot %s: %w", snap.ID, err)
 	}
-	os.Remove(r.releasePath(snap.ID)) // its cached release, if published
+	fsx.Remove(r.releasePath(snap.ID)) // its cached release, if published
 	return nil
 }
 

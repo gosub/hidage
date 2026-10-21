@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"hidage/internal/fsx"
 )
 
 var (
@@ -70,7 +72,7 @@ func AddFolder(p Paths, folder string) (bool, error) {
 	if err := os.WriteFile(p.ConfigPath+".tmp", []byte(out), 0o600); err != nil {
 		return false, err
 	}
-	if err := os.Rename(p.ConfigPath+".tmp", p.ConfigPath); err != nil {
+	if err := fsx.Rename(p.ConfigPath+".tmp", p.ConfigPath); err != nil {
 		return false, err
 	}
 	reset()

@@ -58,7 +58,15 @@ useless until someone adds its contact card.
 `identity.key` lets the daemon host for friends without the passphrase. It cannot decrypt
 backups, but whoever reads it can act as you towards your friends: publish over your
 backups (bounded by their trash) and fetch your (encrypted) data. Keep it like an SSH key;
-deleting it only means a locked daemon can't start until you unlock once.
+deleting it only means a locked daemon can't start until you unlock once. On Windows it is
+protected by the config folder's access list rather than a file mode.
+
+### Saved passphrase
+If you let `daemon --install` save the passphrase in the OS password store, anything
+running as you with access to that store (a Windows Credential Manager entry, a Keychain
+item, a Secret Service item) can read it and, with your keyring file, decrypt your
+backups. That is the price of unattended backups; `passphrase_command` with a hardware
+token, or a locked daemon, avoids it.
 
 ### Leaked invites
 An invite lets whoever holds it pair once until it expires (24 h by default), like an

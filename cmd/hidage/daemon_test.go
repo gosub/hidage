@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/xml"
 	"fmt"
+	"strings"
 	"testing"
 
 	"hidage/internal/pack"
@@ -56,5 +58,33 @@ func TestPlaceShards(t *testing.T) {
 	}
 	if len(owners(nil)) != 0 {
 		t.Fatal("no peers should place nothing")
+	}
+}
+
+func TestWindowsTask(t *testing.T) {
+	task, err := windowsTask(`C:\Program Files\hidage & co\hidage.exe`, `C:\Users\a\AppData\Local\hidage\daemon.log`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Actions struct {
+			Exec struct {
+				Command   string
+				Arguments string
+			}
+		}
+	}
+	// The declaration says UTF-16 (as the file is written); parse the text as is.
+	body := strings.Replace(task, `encoding="UTF-16"`, `encoding="UTF-8"`, 1)
+	if err := xml.Unmarshal([]byte(body), &parsed); err != nil {
+		t.Fatalf("task XML does not parse: %v", err)
+	}
+	want := `--headless cmd.exe /C ""C:\Program Files\hidage & co\hidage.exe" daemon >> "C:\Users\a\AppData\Local\hidage\daemon.log" 2>&1"`
+	if parsed.Actions.Exec.Command != "conhost.exe" || parsed.Actions.Exec.Arguments != want {
+		t.Fatalf("exec = %q %q", parsed.Actions.Exec.Command, parsed.Actions.Exec.Arguments)
+	}
+	enc := utf16File("<a>")
+	if enc != "\xff\xfe<\x00a\x00>\x00" {
+		t.Fatalf("utf16File = %q", enc)
 	}
 }

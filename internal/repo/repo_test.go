@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -427,5 +428,42 @@ func TestImportOlderVersionAndReleaseCache(t *testing.T) {
 	adopted.Forget(v1.ID)
 	if _, err := adopted.LoadRelease(v1.ID); err == nil {
 		t.Fatal("forget should drop the cached release")
+	}
+}
+
+func TestUnreadableFileSkipped(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Getuid() == 0 {
+		t.Skip("needs Unix permissions that apply to the test user")
+	}
+	r, priv, folder := newRepo(t)
+	locked := filepath.Join(folder, "sub", "locked.txt")
+	writeFile(t, locked, "secret")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	snap, stats, err := r.Snapshot(priv, false)
+	if err != nil {
+		t.Fatalf("one unreadable file failed the snapshot: %v", err)
+	}
+	if len(stats.Unreadable) != 1 || stats.Unreadable[0].Path != locked || stats.Unreadable[0].Reason != "permission denied" {
+		t.Fatalf("Unreadable = %+v", stats.Unreadable)
+	}
+	if got := r.LastUnreadable(); len(got) != 1 {
+		t.Fatalf("LastUnreadable = %+v", got)
+	}
+	out := t.TempDir()
+	if err := r.Restore(snap, out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "data", "sub", "b.txt")); err != nil {
+		t.Fatalf("the rest of the folder was not backed up: %v", err)
+	}
+
+	os.Chmod(locked, 0o600)
+	if _, _, err := r.Snapshot(priv, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.LastUnreadable(); len(got) != 0 {
+		t.Fatalf("LastUnreadable after fixing = %+v", got)
 	}
 }

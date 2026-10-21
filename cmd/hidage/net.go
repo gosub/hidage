@@ -33,13 +33,21 @@ import (
 
 // hostedStore is where this node keeps its friends' data.
 func hostedStore() (*hosting.Host, error) {
-	return hosting.Open(filepath.Join(config.DataStoreDir(), "hosted"))
+	root, err := config.EnsureDataStore()
+	if err != nil {
+		return nil, err
+	}
+	return hosting.Open(filepath.Join(root, "hosted"))
 }
 
 // headsStore holds the signed head records friends handed this node, keyed by
 // owner public-key hex, so an owner can get its head back after losing its machine.
 func headsStore() (*store.KeyedStore, error) {
-	return store.NewKeyedStore(filepath.Join(config.DataStoreDir(), "heads"))
+	root, err := config.EnsureDataStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.NewKeyedStore(filepath.Join(root, "heads"))
 }
 
 // nodeStateLoop keeps node.json in step with the node's addresses, which change
@@ -367,9 +375,11 @@ func restoreRelease(ns *netstore.Store, cache *store.KeyedStore, masterKey []byt
 		return "", err
 	}
 	l := dag.NewLoader(cache, cache, masterKey)
-	if err := repo.RestoreWith(l, snap, outDir); err != nil {
+	rs := &repo.Restorer{Loader: l}
+	if err := rs.All(snap, outDir); err != nil {
 		return "", err
 	}
+	printRenamed(rs.Renamed)
 	name, err := repo.RootName(l, snap)
 	if err != nil {
 		return outDir, nil

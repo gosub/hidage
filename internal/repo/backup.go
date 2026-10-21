@@ -2,13 +2,18 @@ package repo
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
 
 	"hidage/internal/chunk"
 	"hidage/internal/dag"
+	"hidage/internal/fsx"
 )
 
 // SnapshotStats summarizes what a snapshot stored.
@@ -17,7 +22,15 @@ type SnapshotStats struct {
 	NewObjects   int      // objects this snapshot actually wrote (the delta)
 	Pruned       int      // objects reclaimed when --replace dropped the previous snapshot
 	Skipped      []string // paths of unsupported entries (symlinks, devices, …) not backed up
+	Unreadable   []Skip   // files and folders that could not be read, left out of the snapshot
 	Unchanged    bool     // SnapshotIfChanged found nothing new and kept the latest snapshot
+}
+
+// Skip is a file or folder left out of a snapshot because it could not be
+// read: locked or in use, no permission, gone mid-backup, or online-only.
+type Skip struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
 }
 
 // Snapshot captures the repository's tracked folder. With replace set, it
@@ -52,13 +65,16 @@ func (r *Repo) snapshot(priv ed25519.PrivateKey, replace, skipUnchanged bool) (*
 	}
 
 	b := dag.NewBuilder(r.meta, r.data, r.masterKey)
-	var skipped []string
-	root, err := r.buildRoot(b, r.Folder, info, &skipped)
+	w := &walk{}
+	root, err := r.buildRoot(b, r.Folder, info, w)
 	if err != nil {
 		return nil, nil, err
 	}
+	if err := r.saveUnreadable(w.unreadable); err != nil {
+		return nil, nil, err
+	}
 	if skipUnchanged && prev != nil && prev.Root.Equal(root) {
-		return prev, &SnapshotStats{TotalObjects: len(before), Skipped: skipped, Unchanged: true}, nil
+		return prev, &SnapshotStats{TotalObjects: len(before), Skipped: w.skipped, Unreadable: w.unreadable, Unchanged: true}, nil
 	}
 
 	// Normally chain to the previous snapshot; when replacing, chain past it so
@@ -90,7 +106,7 @@ func (r *Repo) snapshot(priv ed25519.PrivateKey, replace, skipUnchanged bool) (*
 	if err != nil {
 		return nil, nil, err
 	}
-	stats := &SnapshotStats{TotalObjects: len(after), NewObjects: len(after) - len(before), Skipped: skipped}
+	stats := &SnapshotStats{TotalObjects: len(after), NewObjects: len(after) - len(before), Skipped: w.skipped, Unreadable: w.unreadable}
 
 	if replace && prev != nil {
 		if err := r.Forget(prev.ID); err != nil {
@@ -106,10 +122,41 @@ func (r *Repo) snapshot(priv ed25519.PrivateKey, replace, skipUnchanged bool) (*
 	return snap, stats, nil
 }
 
+// walk collects what a snapshot leaves out.
+type walk struct {
+	skipped    []string // unsupported entries: symlinks, devices, sockets, ...
+	unreadable []Skip
+}
+
+func (w *walk) unread(path string, err error) {
+	w.unreadable = append(w.unreadable, Skip{Path: path, Reason: reason(err)})
+}
+
+// reason turns a read error into a short explanation for the user.
+func reason(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		err = pe.Err
+	}
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return "permission denied"
+	case errors.Is(err, fs.ErrNotExist):
+		return "removed during the backup"
+	case inUse(err):
+		return "in use by another program"
+	}
+	return err.Error()
+}
+
 // buildRoot wraps the tracked folder under a single top-level entry named after
 // it, so it restores under its original name.
-func (r *Repo) buildRoot(b *dag.Builder, src string, info os.FileInfo, skipped *[]string) (dag.Ref, error) {
-	ref, err := r.buildTree(b, src, skipped)
+func (r *Repo) buildRoot(b *dag.Builder, src string, info os.FileInfo, w *walk) (dag.Ref, error) {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return dag.Ref{}, fmt.Errorf("read dir %s: %w", src, err)
+	}
+	ref, err := r.buildTree(b, src, entries, w)
 	if err != nil {
 		return dag.Ref{}, err
 	}
@@ -117,59 +164,76 @@ func (r *Repo) buildRoot(b *dag.Builder, src string, info os.FileInfo, skipped *
 	return b.PutTree(dag.TreeNode{Entries: []dag.Entry{entry}})
 }
 
-// buildTree recurses a directory, skipping the .hidage metadata directory and
-// recording (via skipped) any unsupported entry it can't back up. os.ReadDir
-// returns entries sorted by name, so builds are deterministic.
-func (r *Repo) buildTree(b *dag.Builder, dir string, skipped *[]string) (dag.Ref, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return dag.Ref{}, fmt.Errorf("read dir %s: %w", dir, err)
-	}
+// buildTree builds the tree of a directory from its entries, skipping the
+// .hidage metadata directory. Unsupported entries (via w.skipped) and files or
+// subfolders that can't be read (via w.unreadable) are left out and recorded,
+// so one locked file doesn't fail the whole backup. os.ReadDir returns entries
+// sorted by name, so builds are deterministic.
+func (r *Repo) buildTree(b *dag.Builder, dir string, entries []os.DirEntry, w *walk) (dag.Ref, error) {
 	var tn dag.TreeNode
 	for _, de := range entries {
 		if de.Name() == hidageDir {
 			continue // never back up our own metadata
 		}
 		full := filepath.Join(dir, de.Name())
-		fi, err := de.Info()
+		// Lstat, not de.Info(): on Windows the directory listing's times come
+		// from the parent's index, which NTFS updates lazily, so an unchanged
+		// folder could look changed. On Unix both are an lstat.
+		fi, err := os.Lstat(full)
 		if err != nil {
-			return dag.Ref{}, err
+			w.unread(full, err)
+			continue
 		}
 		switch {
-		case de.IsDir():
-			ref, err := r.buildTree(b, full, skipped)
+		case onlineOnly(fi):
+			w.unreadable = append(w.unreadable, Skip{Path: full, Reason: "online-only, not downloaded"})
+		case fi.IsDir():
+			sub, err := os.ReadDir(full)
+			if err != nil {
+				w.unread(full, err)
+				continue
+			}
+			ref, err := r.buildTree(b, full, sub, w)
 			if err != nil {
 				return dag.Ref{}, err
 			}
 			tn.Entries = append(tn.Entries, dag.Entry{Name: de.Name(), Kind: dag.KindTree, Mode: uint32(fi.Mode().Perm()), ModTime: fi.ModTime().UnixNano(), Ref: ref})
 		case fi.Mode().IsRegular():
-			ref, err := r.buildFile(b, full, fi)
+			ref, readErr, err := r.buildFile(b, full, fi)
 			if err != nil {
 				return dag.Ref{}, err
+			}
+			if readErr != nil {
+				w.unread(full, readErr)
+				continue
 			}
 			tn.Entries = append(tn.Entries, dag.Entry{Name: de.Name(), Kind: dag.KindFile, Mode: uint32(fi.Mode().Perm()), ModTime: fi.ModTime().UnixNano(), Ref: ref})
 		default:
 			// Symlinks, devices, sockets, etc. are not represented in the DAG;
 			// record them so the snapshot can report what it did not capture
 			// rather than dropping them silently.
-			*skipped = append(*skipped, full)
+			w.skipped = append(w.skipped, full)
 		}
 	}
 	return b.PutTree(tn)
 }
 
 // buildFile content-defined-chunks a file and stores each chunk, retaining only
-// the small chunk refs. Memory stays bounded regardless of file size.
-func (r *Repo) buildFile(b *dag.Builder, path string, info os.FileInfo) (dag.Ref, error) {
+// the small chunk refs. Memory stays bounded regardless of file size. A failure
+// to open or read the file is returned as readErr, so the caller can skip it;
+// err is a failure to store, which ends the snapshot. Chunks stored before a
+// read error are reclaimed by the next prune.
+func (r *Repo) buildFile(b *dag.Builder, path string, info os.FileInfo) (ref dag.Ref, readErr, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return dag.Ref{}, fmt.Errorf("open %s: %w", path, err)
+		return dag.Ref{}, err, nil
 	}
 	defer f.Close()
 
+	src := &errReader{r: f}
 	var chunks []dag.Ref
 	var size int64
-	err = chunk.Split(f, func(data []byte) error {
+	err = chunk.Split(src, func(data []byte) error {
 		ref, err := b.PutChunk(data)
 		if err != nil {
 			return err
@@ -178,10 +242,59 @@ func (r *Repo) buildFile(b *dag.Builder, path string, info os.FileInfo) (dag.Ref
 		size += int64(len(data))
 		return nil
 	})
-	if err != nil {
-		return dag.Ref{}, fmt.Errorf("chunk %s: %w", path, err)
+	if src.err != nil {
+		return dag.Ref{}, src.err, nil
 	}
-	return b.PutFile(dag.FileNode{Mode: uint32(info.Mode().Perm()), Size: size, ModTime: info.ModTime().UnixNano(), Chunks: chunks})
+	if err != nil {
+		return dag.Ref{}, nil, fmt.Errorf("chunk %s: %w", path, err)
+	}
+	ref, err = b.PutFile(dag.FileNode{Mode: uint32(info.Mode().Perm()), Size: size, ModTime: info.ModTime().UnixNano(), Chunks: chunks})
+	return ref, nil, err
+}
+
+// errReader remembers the first read error other than EOF, telling a file that
+// can't be read apart from a store that can't be written.
+type errReader struct {
+	r   io.Reader
+	err error
+}
+
+func (e *errReader) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err != nil && err != io.EOF && e.err == nil {
+		e.err = err
+	}
+	return n, err
+}
+
+// unreadablePath is where the last snapshot's unreadable list is kept, for
+// `hidage status`.
+func (r *Repo) unreadablePath() string { return r.HidageFile("unreadable.json") }
+
+func (r *Repo) saveUnreadable(list []Skip) error {
+	if len(list) == 0 {
+		if err := fsx.Remove(r.unreadablePath()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	data, err := json.MarshalIndent(list, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(r.unreadablePath(), data, 0o600)
+}
+
+// LastUnreadable returns what the latest snapshot had to leave out because it
+// could not be read.
+func (r *Repo) LastUnreadable() []Skip {
+	data, err := os.ReadFile(r.unreadablePath())
+	if err != nil {
+		return nil
+	}
+	var list []Skip
+	json.Unmarshal(data, &list)
+	return list
 }
 
 // objectIDs returns the union of object IDs across the meta and data stores.
