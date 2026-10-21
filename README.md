@@ -35,8 +35,12 @@ How it compares:
 
 ## Install
 
-hidage runs on Linux and macOS, on x86-64 (amd64) and ARM (arm64). Windows is not
-supported yet.
+hidage runs on Linux, macOS and Windows 10/11, on x86-64 (amd64) and ARM (arm64).
+
+> **The Windows binaries are untested on real machines.** They are cross-compiled
+> and the unit tests pass on GitHub's Windows runners, but pairing, the firewall
+> prompt, the scheduled task, the password store and a full backup and restore have
+> not been tried on Windows yet. Please report what works and what doesn't.
 
 Download the binary for your system from the
 [releases page](https://github.com/gosub/hidage/releases), check it against
@@ -50,8 +54,22 @@ hidage --version
 ```
 
 The binaries are `hidage-linux-amd64`, `hidage-linux-arm64`, `hidage-darwin-amd64`
-(Intel Mac) and `hidage-darwin-arm64` (Apple silicon). On macOS, a binary downloaded
-with a browser is quarantined; clear it with `xattr -d com.apple.quarantine hidage`.
+(Intel Mac), `hidage-darwin-arm64` (Apple silicon), `hidage-windows-amd64.exe` and
+`hidage-windows-arm64.exe`. On macOS, a binary downloaded with a browser is
+quarantined; clear it with `xattr -d com.apple.quarantine hidage`.
+
+On Windows, in PowerShell:
+
+```powershell
+mkdir $env:LOCALAPPDATA\Programs\hidage -Force
+curl.exe -Lo $env:LOCALAPPDATA\Programs\hidage\hidage.exe https://github.com/gosub/hidage/releases/latest/download/hidage-windows-amd64.exe
+$env:Path += ";$env:LOCALAPPDATA\Programs\hidage"   # add it to Path in Settings to keep it
+hidage --version
+```
+
+The `.exe` is not signed yet, so SmartScreen may warn the first time you run it, and
+Windows Firewall asks whether to let hidage accept connections: allow it on private
+networks so friends can reach you.
 
 ## Compile from source
 
@@ -72,8 +90,9 @@ whenever a `vX.Y.Z` tag is pushed.
 ```sh
 hidage init                       # keyring, config.toml and data store; asks for a passphrase
 hidage id --kit                   # your recovery kit: print it, keep it offline
-hidage daemon --install           # install it as a login service (systemd or launchd);
-                                  #   it prints the one command that starts it
+hidage daemon --install           # install it as a login service (systemd, launchd or Task
+                                  #   Scheduler), offer to save your passphrase in the
+                                  #   OS password store, and print the command that starts it
 hidage friend invite              # prints an invite: send it to a friend, privately
 ```
 
@@ -94,16 +113,18 @@ hidage backup ~/Documents         # snapshot it, send it to your friends, and ad
 hidage status                     # run inside the folder: is it protected, and how well?
 ```
 
-**Let it run unattended.** The daemon needs your passphrase to take backups. Tell it
-how to get one in `~/.config/hidage/config.toml`:
+**Let it run unattended.** The daemon needs your passphrase to take backups.
+`hidage daemon --install` offers to save it in the OS password store: Windows
+Credential Manager, the macOS Keychain, or the Secret Service on Linux (GNOME Keyring,
+KWallet). Alternatively, set a command that prints it in `config.toml`:
 
 ```toml
 passphrase_command = "pass show hidage"
 # or: "systemd-creds decrypt ~/.config/hidage/pass.cred -"
 ```
 
-Without it the daemon runs *locked*: it keeps storing and relaying for your friends,
-but takes no backups of yours, and `hidage status` says so.
+Without either, the daemon runs *locked*: it keeps storing and relaying for your
+friends, but takes no backups of yours, and `hidage status` says so.
 
 Pair with at least two friends: with only one, losing them loses the backup, and
 `hidage backup` warns about it.
@@ -158,10 +179,10 @@ directory, like git; elsewhere, pass `-C <dir>`. Snapshot ids can be shortened t
 unambiguous prefix, and `latest` names the newest. Run `hidage <command> --help` for
 every flag.
 
-Everything else is a setting in `~/.config/hidage/config.toml`, which `init` writes
-with comments: the folders the daemon backs up and how often, redundancy, the space you
-give friends by default, how long their data is kept, how many old versions to keep,
-and network addresses.
+Everything else is a setting in `config.toml` (see [Where things live](#where-things-live)),
+which `init` writes with comments: the folders the daemon backs up and how often,
+redundancy, the space you give friends by default, how long their data is kept, how
+many old versions to keep, and network addresses.
 
 ## What happens to your data
 
@@ -191,17 +212,22 @@ do, see [`THREAT_MODEL.md`](THREAT_MODEL.md).
 
 ## Where things live
 
-| What | Where |
-|---|---|
-| Settings | `~/.config/hidage/config.toml` |
-| Keyring: your root secret, wrapped under your passphrase | `~/.config/hidage/keyring.json` |
-| Friend list | `~/.config/hidage/friends.json` |
-| Per-folder history and metadata | `<folder>/.hidage/`, travels with the folder like `.git` |
-| File data, yours and your friends' | `~/.local/share/hidage/store` |
+| What | Linux and macOS | Windows |
+|---|---|---|
+| Settings | `~/.config/hidage/config.toml` | `%AppData%\hidage\config.toml` |
+| Keyring: your root secret, wrapped under your passphrase | `~/.config/hidage/keyring.json` | `%AppData%\hidage\keyring.json` |
+| Friend list | `~/.config/hidage/friends.json` | `%AppData%\hidage\friends.json` |
+| File data, yours and your friends' | `~/.local/share/hidage/store` | `%LocalAppData%\hidage\store` |
+| Daemon log | the journal (Linux), `~/Library/Logs/hidage.log` (macOS) | `%LocalAppData%\hidage\daemon.log` |
+
+Each backed-up folder also gets a `.hidage/` directory with its history and metadata,
+which travels with the folder like `.git`.
 
 Put the store on a roomy disk with `store` in `config.toml` or `HIDAGE_STORE`, and
 exclude it from other backups. It must be on a single filesystem that supports hard
-links, which is how identical chunks are shared across folders.
+links, which is how identical chunks are shared across folders: NTFS, APFS, ext4 and
+most others do, FAT32 and exFAT (common on USB drives) don't, and `init` refuses them.
+The settings folder and the store are readable only by you.
 
 ## Try it on one machine
 
@@ -233,6 +259,16 @@ person, and the shards spread over both friends.
 
 ## Known limitations
 
+- **Windows is untested.** See [Install](#install): the Windows build compiles and
+  passes the unit tests, and that is all that is known so far.
+- **Files in use can be skipped.** A file that is locked or can't be read (common on
+  Windows for open mail stores and databases) is left out of that backup and listed,
+  and `hidage status` shows how many. hidage doesn't read through Volume Shadow Copy
+  yet. Online-only cloud files (OneDrive, iCloud Drive) are skipped rather than
+  downloaded.
+- **Names are adapted on restore.** Restoring a Linux or macOS backup on Windows, or
+  onto a case-insensitive disk, renames files whose names can't exist there (such as
+  `a:b`, `CON`, or `A.txt` next to `a.txt`) and lists them.
 - **One reachable friend is needed.** Nodes behind a NAT connect through a friend's
   relay, and relays only work on a node with a public address. At least one friend
   needs a forwarded port, a small VPS running `hidage daemon`, or an overlay network
@@ -245,8 +281,9 @@ person, and the shards spread over both friends.
 - **One writer per folder.** Backing up the same folder from two devices is not
   supported; there is no conflict resolution.
 - **The cached identity key.** So the daemon can serve friends while locked, your node
-  identity is stored unencrypted in `~/.config/hidage/identity.key` (readable only by
-  you). It can't decrypt backups, but whoever reads it can pose as you to your friends.
+  identity is stored unencrypted in `identity.key` next to `config.toml` (readable
+  only by you). It can't decrypt backups, but whoever reads it can pose as you to your
+  friends.
 - **No forward secrecy at rest.** A leaked master key decrypts every snapshot it ever
   encrypted.
 - **Not anonymous.** Friends see each other's IP addresses.
@@ -257,6 +294,7 @@ person, and the shards spread over both friends.
   a reachable node.
 - Getting data back from a friend's trash after a bad backup replaced the good one.
 - Backing up from several devices under one identity.
+- Volume Shadow Copy on Windows, and signed Windows binaries.
 
 ## Development
 
