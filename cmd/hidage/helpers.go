@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
@@ -119,11 +118,6 @@ func discoverRepoNoKey() (*repo.Repo, error) {
 		return nil, fmt.Errorf("not inside a hidage repository (run `hidage backup <folder>` to create one)")
 	}
 	return repo.Open(folder, nil, config.DataStoreDir())
-}
-
-// processAlive reports whether a process with this pid exists.
-func processAlive(pid int) bool {
-	return pid > 0 && syscall.Kill(pid, 0) == nil
 }
 
 // friendAddrInfos returns every friend with known addresses as libp2p address
