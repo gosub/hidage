@@ -129,3 +129,44 @@ func TestBuildIsDeterministic(t *testing.T) {
 		t.Fatalf("pack counts differ: %d vs %d", len(r1.Packs), len(r2.Packs))
 	}
 }
+
+// Adding one object to many must leave almost every pack, and so almost every
+// shard, unchanged.
+func TestPacksStableUnderSmallChanges(t *testing.T) {
+	r := rand.New(rand.NewSource(2))
+	objs := map[string][]byte{}
+	for i := 0; i < 400; i++ {
+		b := make([]byte, 50_000+r.Intn(200_000))
+		r.Read(b)
+		objs[hashID(b)] = b
+	}
+	shardSet := func(o map[string][]byte) map[string]bool {
+		_, shards, err := Build(o, 2.0, "snap")
+		if err != nil {
+			t.Fatal(err)
+		}
+		m := map[string]bool{}
+		for id := range shards {
+			m[id] = true
+		}
+		return m
+	}
+	before := shardSet(objs)
+	extra := make([]byte, 100_000)
+	r.Read(extra)
+	objs[hashID(extra)] = extra
+	after := shardSet(objs)
+
+	changed := 0
+	for id := range after {
+		if !before[id] {
+			changed++
+		}
+	}
+	if changed*10 > len(after) {
+		t.Fatalf("%d of %d shards changed after adding one object (want < 10%%)", changed, len(after))
+	}
+	if groups := groupByContent(objs); len(groups) < 5 {
+		t.Fatalf("only %d packs; the test needs several", len(groups))
+	}
+}

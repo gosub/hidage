@@ -19,9 +19,17 @@ import (
 	"hidage/internal/shard"
 )
 
-// MaxPackSize bounds how much object data goes into one pack before erasure
-// coding (so each pack splits into reasonably sized symbols).
-const MaxPackSize = 8 << 20 // 8 MiB
+// Pack sizes: a pack closes at a content-defined boundary once it holds at
+// least MinPackSize, and is forced closed at MaxPackSize (so each pack splits
+// into reasonably sized shards).
+const (
+	MinPackSize = 2 << 20 // 2 MiB
+	MaxPackSize = 8 << 20 // 8 MiB
+)
+
+// boundaryMask makes about one object id in 8 a pack boundary (once the pack
+// has MinPackSize).
+const boundaryMask = 0x07
 
 // ShardRef names one shard and its index within the pack's shard set.
 type ShardRef struct {
@@ -50,7 +58,7 @@ func Build(objects map[string][]byte, redundancy float64, snapshotID string) (*R
 	rel := &Release{SnapshotID: snapshotID}
 	shardBlobs := map[string][]byte{}
 
-	for _, group := range groupBySize(objects, MaxPackSize) {
+	for _, group := range groupByContent(objects) {
 		packBytes := encodePack(group, objects)
 		params, shards, err := shard.Encode(packBytes, redundancy)
 		if err != nil {
@@ -99,11 +107,14 @@ func Reassemble(rel *Release, get func(id string) ([]byte, error)) (map[string][
 	return objects, nil
 }
 
-// groupBySize greedily bins object ids into groups no larger than max bytes.
-// Ids are sorted first so Build is deterministic: the same objects always yield
-// the same packs and therefore the same shard ids, which lets a republish renew
-// existing shards (and their storage leases) instead of producing new ones.
-func groupBySize(objects map[string][]byte, max int) [][]string {
+// groupByContent bins object ids, in sorted order, into packs whose boundaries
+// are chosen by the ids themselves: after MinPackSize, a pack closes after an
+// object whose id is a boundary. Adding or removing an object then changes only
+// the pack it falls in (and, rarely, the next one), so a republish after a small
+// change re-sends a few shards instead of most of them, and shards shared by
+// several snapshots are stored once. Build is deterministic: the same objects
+// always yield the same packs and therefore the same shard ids.
+func groupByContent(objects map[string][]byte) [][]string {
 	ids := make([]string, 0, len(objects))
 	for id := range objects {
 		ids = append(ids, id)
@@ -115,17 +126,27 @@ func groupBySize(objects map[string][]byte, max int) [][]string {
 	var size int
 	for _, id := range ids {
 		data := objects[id]
-		if size > 0 && size+len(data) > max {
-			groups = append(groups, cur)
+		if size > 0 && size+len(data) > MaxPackSize {
+			groups = append(groups, cur) // forced: the pack would grow too large
 			cur, size = nil, 0
 		}
 		cur = append(cur, id)
 		size += len(data)
+		if size >= MinPackSize && isBoundary(id) {
+			groups = append(groups, cur)
+			cur, size = nil, 0
+		}
 	}
 	if len(cur) > 0 {
 		groups = append(groups, cur)
 	}
 	return groups
+}
+
+// isBoundary reports whether an object id ends a pack (about 1 in 8 do).
+func isBoundary(id string) bool {
+	sum := sha256.Sum256([]byte(id)) // ids are hashes already, but not all are hex
+	return sum[0]&boundaryMask == 0
 }
 
 // encodePack serializes a group of objects: uint32 count, then per object
