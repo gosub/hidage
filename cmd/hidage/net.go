@@ -309,9 +309,9 @@ func listFromFriends(kr *keyring.Keyring, from []string) error {
 		fmt.Println("(no backups published to your friends)")
 		return nil
 	}
-	fmt.Printf("%-24s  %-12s  %s\n", "NAME", "REPO-ID", "PUBLISHED")
+	fmt.Printf("%-24s  %-12s  %-8s  %s\n", "NAME", "REPO-ID", "VERSIONS", "PUBLISHED")
 	for _, e := range manifest.Entries {
-		fmt.Printf("%-24s  %-12s  %s\n", e.Name, e.RepoID[:12], e.UpdatedAt.Local().Format("2006-01-02 15:04:05"))
+		fmt.Printf("%-24s  %-12s  %-8d  %s\n", e.Name, e.RepoID[:12], 1+len(e.History), e.UpdatedAt.Local().Format("2006-01-02 15:04:05"))
 	}
 	return nil
 }
@@ -376,11 +376,47 @@ func restoreRelease(ns *netstore.Store, cache *store.KeyedStore, masterKey []byt
 	}
 	folder := filepath.Join(outDir, name)
 	if adopt && !repo.Exists(folder) {
-		if _, err := repo.Adopt(folder, masterKey, config.DataStoreDir(), e.RepoID, objects[rel.SnapshotID], cache.Get); err != nil {
+		r, err := repo.Adopt(folder, masterKey, config.DataStoreDir(), e.RepoID, objects[rel.SnapshotID], cache.Get)
+		if err != nil {
 			return "", err
+		}
+		r.SaveRelease(rel.SnapshotID, relBytes)
+		// Bring back the older versions friends keep too, so history survives.
+		for _, id := range e.History {
+			if err := importVersion(ns, cache, r, id); err != nil {
+				fmt.Printf("  could not recover an older version of %q: %v\n", e.Name, err)
+			}
 		}
 	}
 	return folder, nil
+}
+
+// importVersion adds an older published version (by Release id) to r.
+func importVersion(ns *netstore.Store, cache *store.KeyedStore, r *repo.Repo, relID string) error {
+	relBytes, err := ns.Get(relID)
+	if err != nil {
+		return fmt.Errorf("fetch release: %w", err)
+	}
+	if store.ID(relBytes) != relID {
+		return fmt.Errorf("release failed integrity check")
+	}
+	var rel pack.Release
+	if err := json.Unmarshal(relBytes, &rel); err != nil {
+		return err
+	}
+	objects, err := pack.Reassemble(&rel, ns.Get)
+	if err != nil {
+		return fmt.Errorf("reassemble: %w", err)
+	}
+	for id, data := range objects {
+		if err := cache.Put(id, data); err != nil {
+			return err
+		}
+	}
+	if err := r.Import(objects[rel.SnapshotID], cache.Get); err != nil {
+		return err
+	}
+	return r.SaveRelease(rel.SnapshotID, relBytes)
 }
 
 // resolveManifest fetches and verifies this node's newest account manifest from

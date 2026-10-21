@@ -54,15 +54,24 @@ The folder is also added to the folders "hidage daemon" keeps backed up (unless
 				fmt.Printf("Created repository in %s/.hidage\n", r.Folder)
 			}
 
-			snap, stats, err := r.Snapshot(kr.Identity().Private, replace)
+			var snap *repo.Snapshot
+			var stats *repo.SnapshotStats
+			if replace {
+				snap, stats, err = r.Snapshot(kr.Identity().Private, true)
+			} else {
+				snap, stats, err = r.SnapshotIfChanged(kr.Identity().Private)
+			}
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Snapshot %s of %s: %d new objects", snap.ID[:12], r.Folder, stats.NewObjects)
-			if replace && stats.Pruned > 0 {
-				fmt.Printf(", replaced the previous one (pruned %d)", stats.Pruned)
+			switch {
+			case stats.Unchanged:
+				fmt.Printf("No changes since snapshot %s of %s.\n", snap.ID[:12], r.Folder)
+			case replace && stats.Pruned > 0:
+				fmt.Printf("Snapshot %s of %s: %d new objects, replaced the previous one (pruned %d)\n", snap.ID[:12], r.Folder, stats.NewObjects, stats.Pruned)
+			default:
+				fmt.Printf("Snapshot %s of %s: %d new objects\n", snap.ID[:12], r.Folder, stats.NewObjects)
 			}
-			fmt.Println()
 			if n := len(stats.Skipped); n > 0 {
 				fmt.Printf("WARNING: skipped %d unsupported entr%s (symlinks/devices/etc.), not backed up:\n",
 					n, plural(n, "y", "ies"))
@@ -101,6 +110,7 @@ The folder is also added to the folders "hidage daemon" keeps backed up (unless
 			if !cmd.Flags().Changed("min-friends") {
 				opts.minPeers = settings.Backup.MinFriends
 			}
+			opts.retention = retentionPolicy(settings)
 			node, err := p2p.New(kr.Identity(), nil, nil)
 			if err != nil {
 				return err
@@ -338,14 +348,32 @@ func showDiff(selA, selB string) error {
 }
 
 func newForgetCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "forget <snapshot>...",
+	var retention, dryRun bool
+	cmd := &cobra.Command{
+		Use:   "forget <snapshot>... | --retention",
 		Short: "Delete snapshots from this folder's history and free the space only they used",
-		Args:  cobra.MinimumNArgs(1),
+		Long: `Delete snapshots from this folder's history and free the space only they used.
+With --retention, delete every snapshot the [retention] policy in config.toml doesn't
+keep (the daemon does this after each new snapshot). The next backup also drops them
+from what your friends hold (after their trash grace period).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, err := discoverRepo()
 			if err != nil {
 				return err
+			}
+			if retention {
+				if len(args) > 0 {
+					return errors.New("use either snapshot ids or --retention")
+				}
+				settings, _ := config.Load()
+				n, err := applyRetention(r, retentionPolicy(settings), dryRun, os.Stdout)
+				if err == nil && n == 0 {
+					fmt.Println("Nothing to forget: the retention policy keeps every snapshot.")
+				}
+				return err
+			}
+			if len(args) == 0 {
+				return errors.New("name the snapshots to forget, or use --retention")
 			}
 			for _, sel := range args {
 				snap, err := r.FindSnapshot(sel)
@@ -365,4 +393,7 @@ func newForgetCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&retention, "retention", false, "forget what the [retention] policy doesn't keep")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "with --retention: only show what would be forgotten")
+	return cmd
 }

@@ -235,13 +235,17 @@ func scheduledBackup(ctx context.Context, node *p2p.Node, kr *keyring.Keyring, b
 	}
 	if !stats.Unchanged {
 		fmt.Fprintf(out, "snapshot %s: %d new objects\n", snap.ID[:12], stats.NewObjects)
+		if _, err := applyRetention(r, retentionPolicy(settings), false, out); err != nil {
+			fmt.Fprintf(out, "retention failed: %v\n", err)
+		}
 	}
 	dist, derr := readDistribution(r.HidageFile("distribution.json"))
 	due := derr != nil || dist.SnapshotID != snap.ID ||
 		time.Since(dist.PublishedAt) > time.Duration(settings.Backup.RenewEvery)
 	if due {
 		c, cancel := context.WithTimeout(ctx, 30*time.Minute)
-		opts := publishOpts{redundancy: settings.Backup.Redundancy, minPeers: settings.Backup.MinFriends, quiet: true}
+		opts := publishOpts{redundancy: settings.Backup.Redundancy, minPeers: settings.Backup.MinFriends,
+			quiet: true, retention: retentionPolicy(settings)}
 		if err := publishRepo(c, node, kr, r, book, opts, out); err != nil {
 			fmt.Fprintf(out, "publish failed: %v\n", err)
 		}

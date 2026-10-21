@@ -20,8 +20,9 @@ import (
 // Entry is one repository's current release on the network.
 type Entry struct {
 	RepoID    string    `json:"repoID"`
-	Name      string    `json:"name"`      // the repo's source folder name, for display/selection
-	ReleaseID string    `json:"releaseID"` // content address of the pack.Release
+	Name      string    `json:"name"`              // the repo's source folder name, for display/selection
+	ReleaseID string    `json:"releaseID"`         // content address of the pack.Release
+	History   []string  `json:"history,omitempty"` // Releases of older retained versions, newest first
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
