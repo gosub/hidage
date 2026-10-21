@@ -1,242 +1,287 @@
-# hidage — hidden storage
+# hidage: encrypted backup with your friends
 
-`hidage` is a peer-to-peer, pseudonymous, distributed backup system. The goal: back up a
-file or folder by spreading **encrypted, erasure-coded shards** across a P2P network
-instead of a central server. Each node contributes more local disk than it consumes
-remotely (e.g. 2–4×), trading abundant local space for durable remote storage, while a
-reputation ledger tracks which hosts are reliable.
+`hidage` backs up your folders to your friends' computers instead of a cloud service.
+You keep their backups, they keep yours, each within the space you agree to give.
+Everything is encrypted before it leaves your machine, so friends hold pieces they
+cannot read. If your laptop dies, your 24-word recovery phrase and one friend's
+contact card bring back your files, their history and your friend list.
 
-> **Status: networked + redundant.** The encrypted **versioned storage core**
-> (content-addressed repository with incremental snapshots, history, diff, prune)
-> distributes over a **libp2p P2P network**: nodes discover objects via a Kademlia DHT;
-> a snapshot is **erasure-coded** and its shards spread across trusted peers (any K of M
-> reconstruct, so it survives losing a minority); peers are kept honest by **proof-of-
-> storage audits** feeding a **reputation** score, and a **space-accounting** ledger
-> enforces the contribute-more-than-you-consume model. A backup is recoverable on a fresh
-> machine from just the **recovery phrase + one bootstrap peer**.
+> **Status: experimental.** Backup, pairing, recovery and audits work end to end and
+> are tested, but the on-disk and network formats may still change. Don't make it the
+> only copy of anything you can't afford to lose yet.
 
-## How it works
+## Why hidage
 
-You back up a folder by **snapshotting** it. Like git, each tracked folder gets a
-`.hidage/` directory holding its metadata; unlike git, the bulk file data goes to a
-separate node-wide store, and the encryption key is shared across all your folders.
+- **No provider, no bill.** Storage is the spare disk you and your friends already
+  have. Nobody else needs an account, a server or an open SSH port.
+- **Friends can't read your data, and losing one doesn't lose it.** Each backup is
+  encrypted, then erasure-coded into shards spread across your friends. With the
+  default 2x redundancy, any half of the shards rebuild it.
+- **You know it's still there.** The daemon regularly challenges friends to prove they
+  still hold your shards, and `hidage status` tells you how many friends you could lose
+  before a backup is at risk.
+- **Real backups, not sync.** Every snapshot is versioned and deduplicated. Deleting or
+  scrambling a file locally doesn't touch the versions your friends hold.
 
-```
-files ─FastCDC chunk─▶ chunks ─encrypt─▶ Merkle DAG (file + tree nodes) ─▶ signed snapshot
-                          └── an unchanged chunk keeps its hash ⇒ stored once, reused ──┘
-```
+How it compares:
 
-1. **Chunk** — files are split with content-defined chunking (FastCDC), so editing or
-   inserting bytes mid-file only changes nearby chunks; the rest keep their identity.
-2. **Encrypt** — each chunk (and DAG node) is sealed with ChaCha20-Poly1305 under your
-   **user-level master key** (one per user, wrapped by an Argon2id key from your
-   passphrase). Encryption is *deterministic* (key/nonce derived from the content under
-   the master key), so identical chunks encrypt identically and **deduplicate — even
-   across different folders** — without leaking chunk-equality to other users.
-3. **Build the Merkle DAG** — chunks → file nodes → directory (tree) nodes → a root, each
-   content-addressed. An unchanged file or subtree keeps the same reference and is never
-   re-stored.
-4. **Snapshot** — an Ed25519-signed root chained to its parent. Re-snapshotting an
-   unchanged tree stores **nothing**; changing one file stores only its new chunks plus
-   the tree nodes on the path to the root. Old snapshots stay restorable until you forget
-   and prune them (or use `snapshot --replace` to supersede the previous one in one step).
+| | hidage | restic / borg + a friend's server | Syncthing | Tahoe-LAFS |
+|---|---|---|---|---|
+| Encrypted before it leaves | yes | yes | only to "untrusted" devices | yes |
+| Versioned history | yes | yes | optional per-folder versioning | no (a filesystem) |
+| Survives losing a host | yes, erasure-coded | one host per repository | if other devices have a copy | yes, erasure-coded |
+| Checks hosts still hold it | yes, audits | by reading it all back | no | yes |
+| Setup for the friend | one invite | an account, SSH, an open port | pairing | run a storage node, an introducer |
 
-**Where things live:**
+## Install
 
-| What | Where | Notes |
-|---|---|---|
-| Keyring (root secret → master key + identity) | `~/.config/hidage/keyring.json` | one 32-byte root, wrapped under your passphrase; export it as a recovery phrase |
-| Per-folder metadata (config, snapshots, DAG nodes) | `<folder>/.hidage/` | travels with the folder, like `.git` |
-| Bulk chunk data | `$HIDAGE_STORE` or `/opt/hidage/store` | node-wide, outside `$HOME`; one pooled copy per chunk, hard-linked per repo so identical chunks dedup across folders |
+hidage runs on Linux and macOS, on x86-64 (amd64) and ARM (arm64). Windows is not
+supported yet.
 
-> **Want the real internals?** [`DESIGN.md`](DESIGN.md) details the key hierarchy, the
-> deterministic AEAD scheme, the DAG node formats, snapshot signing/history, and the
-> prune/GC algorithm — plus the threat model and what's deliberately out of scope.
-
-## Build
+Download the binary for your system from the
+[releases page](https://github.com/gosub/hidage/releases), check it against
+`SHA256SUMS`, and put it on your `PATH`:
 
 ```sh
-go build -o hidage ./cmd/hidage
+curl -LO https://github.com/gosub/hidage/releases/latest/download/hidage-linux-amd64
+chmod +x hidage-linux-amd64
+mv hidage-linux-amd64 ~/.local/bin/hidage
+hidage --version
 ```
 
-## Usage
+The binaries are `hidage-linux-amd64`, `hidage-linux-arm64`, `hidage-darwin-amd64`
+(Intel Mac) and `hidage-darwin-arm64` (Apple silicon). On macOS, a binary downloaded
+with a browser is quarantined; clear it with `xattr -d com.apple.quarantine hidage`.
+
+## Compile from source
+
+You need Go 1.26 or newer:
 
 ```sh
-hidage init                       # one-time: create the keyring (master key + identity)
-hidage recovery-code              # print the 24-word phrase — WRITE IT DOWN
-
-hidage snapshot ./project         # snapshot a folder (creates ./project/.hidage on first use)
-hidage snapshot --replace ./project   # … superseding the previous snapshot (no history kept)
-cd project && hidage snapshots    # run inside a tracked folder; commands discover .hidage
-hidage diff <idA> <idB>           # paths added / removed / modified between snapshots
-hidage restore <id> ./out         # materialize a version into ./out
-hidage forget <id>                # drop a snapshot record …
-hidage prune                      # … then GC objects no snapshot references
-
-hidage recover                    # on a new machine: rebuild the keyring from the phrase
-
-hidage trust add <pubkey>         # trust a peer's key (bypass reputation, friend-to-friend)
-hidage trust block <pubkey>       # block a peer's key (never interact)
-hidage trust list                 # show trusted / blocked keys
-
-# networking
-hidage serve --listen /ip4/0.0.0.0/tcp/4001   # run a node: join the DHT, serve objects,
-                                              #   accept pushes within trust + space budget;
-                                              #   --lease H reclaims un-renewed hosted shards;
-                                              #   advertises for --open discovery (--advertise=false to opt out)
-hidage publish --trusted --redundancy 3       # erasure-code the latest snapshot and spread
-                                              #   shards across every trusted peer found online
-hidage publish --peer <addr> --min-peers 3    # …or name peers explicitly; --min-peers guards
-                                              #   against too few for the redundancy to matter
-hidage publish --open --redundancy 3          # …or discover untrusted storage nodes via a
-                                              #   rendezvous tag (best-effort; ranked by reputation)
-hidage publish --open --transitive            # …ranking strangers by depth-1 opinions from
-                                              #   your trusted + reputable peers
-hidage net-list --bootstrap <addr>            # list all folders you've published
-hidage net-restore ./out --all --bootstrap <addr>   # recover from the network: resolve the
-                                              #   account, gather K-of-M shards, rebuild, restore
-                                              #   (--repo <name> for just one)
-
-# reputation, audits, accounting
-hidage audit --peer <addr>        # challenge peers to prove they hold your shards
-                                  #   (updates reputation; revokes credit on failure)
-hidage reputation                 # per-peer audit scores (recency-weighted)
-hidage accounting                 # bytes you store for peers vs. they store for you
+git clone https://github.com/gosub/hidage.git && cd hidage
+go install ./cmd/hidage          # into $(go env GOPATH)/bin; or: go build ./cmd/hidage
 ```
 
-- A tracked folder is one containing `.hidage/`; `snapshot` creates it on first use.
-  Other commands **discover it by walking up from the current directory** (git-style),
-  or pass `-C <dir>` to start elsewhere.
-- The **bulk chunk store** defaults to `/opt/hidage/store`; override with the
-  `HIDAGE_STORE` env var (create it once and make it writable — `hidage` prints the exact
-  commands if it can't).
-- Snapshot IDs may be given as any unambiguous **prefix**.
-- The passphrase (set at `init`) is read interactively; for scripting/tests set
-  `HIDAGE_PASSPHRASE`.
-- **Recovery:** `recovery-code` prints a 24-word BIP39 phrase encoding the root secret
-  (master key + identity). Keep it offline — anyone with it can decrypt your backups, and
-  it's the only way to get your key back if you lose this machine. `hidage recover` reads
-  the phrase from stdin and rebuilds the keyring (under a new passphrase). With the phrase
-  plus a bootstrap peer, `hidage net-restore` rebuilds the snapshots and files from the
-  network — no local `.hidage` or chunk store needed.
+Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml)
+whenever a `vX.Y.Z` tag is pushed.
 
-## End-to-end demo
+## Quick start
 
-Incremental snapshots in action — a one-byte change re-stores almost nothing:
+**You:**
 
 ```sh
-go build -o hidage ./cmd/hidage
-export HIDAGE_PASSPHRASE='correct horse battery staple'
-export HIDAGE_STORE="$PWD/.hidage-data"        # a writable chunk store for the demo
-
-hidage init
-mkdir -p project
-echo hello > project/a.txt
-head -c 3000000 /dev/urandom > project/big.bin  # a large, unchanging file
-hidage snapshot ./project                        # snapshot 1 (creates ./project/.hidage)
-
-echo goodbye > project/a.txt                     # edit one small file
-cd project
-hidage snapshot                                  # snapshot 2 (discovers .hidage); stores only the delta
-
-hidage snapshots
-A=$(hidage snapshots | awk 'NR==2{print $1}')
-hidage diff "$A" "$(hidage snapshots | awk 'NR==3{print $1}')"   # ~ project/a.txt
-hidage restore "$A" /tmp/out                      # older version restores intact
-diff /tmp/out/project/big.bin big.bin && echo "big.bin restored identically"
+hidage init                       # keyring, config.toml and data store; asks for a passphrase
+hidage id --kit                   # your recovery kit: print it, keep it offline
+hidage daemon --install           # install it as a login service (systemd or launchd);
+                                  #   it prints the one command that starts it
+hidage friend invite              # prints an invite: send it to a friend, privately
 ```
 
-`big.bin`'s chunks are written once and reused across both snapshots (and would also be
-reused if the same file appeared in a *different* tracked folder); only `a.txt`'s new
-chunk and the tree nodes up to the root are added the second time.
-
-## Tests
+**Your friend** installs hidage and does the same `init` and `daemon --install`, then:
 
 ```sh
-go test ./...
+hidage friend add hidage1:ak6m…   # the invite you sent; you are now friends both ways
 ```
 
-Coverage includes: deterministic chunk encryption (determinism + wrong-key/corruption
-rejection), content-defined chunk stability under insertion, DAG round-trip / diff /
-reachability, the three stores (FS + hardlink cross-repo dedup and refcounted delete +
-keyed-store lease reap/renew), the keyring (deterministic derivation, wrong-pass,
-recovery-code roundtrip), and the repository end to end — snapshot/restore, `.hidage`
-exclusion, incremental-delta accounting, history/diff, `--replace`, and forget + prune.
-Networking: two-node object transfer, DHT provide/discover, push gated by trust, signed
-head publish/resolve, proof-of-storage audits, the reputation-query protocol and the
-transitive-aggregation math, reputation (recency decay: stale reverts to unproven, a recent
-fail dominates banked passes), space accounting (ratio/free + revoke), the account manifest
-(upsert/find/roundtrip), Reed-Solomon encode/decode (incl. decode from any K subset),
-deterministic pack build + reassemble below and above the shard threshold, a
-**cross-node recovery** test, and the **redundant-recovery** test (shards spread over 3
-peers, one killed, full byte-identical recovery from the survivors).
+An invite works once and expires after 24 hours. If you're offline when your friend
+adds it, their daemon retries until it reaches you.
 
-## Project layout
+**Back up a folder:**
 
-| Path | Responsibility |
+```sh
+hidage backup ~/Documents         # snapshot it, send it to your friends, and add it to
+                                  #   the folders the daemon backs up every hour
+hidage status                     # run inside the folder: is it protected, and how well?
+```
+
+**Let it run unattended.** The daemon needs your passphrase to take backups. Tell it
+how to get one in `~/.config/hidage/config.toml`:
+
+```toml
+passphrase_command = "pass show hidage"
+# or: "systemd-creds decrypt ~/.config/hidage/pass.cred -"
+```
+
+Without it the daemon runs *locked*: it keeps storing and relaying for your friends,
+but takes no backups of yours, and `hidage status` says so.
+
+Pair with at least two friends: with only one, losing them loses the backup, and
+`hidage backup` warns about it.
+
+## Getting files back
+
+```sh
+hidage restore --to ~/out                  # the latest snapshot of this folder
+hidage log                                 # history, newest first
+hidage restore 3f2a notes/todo.txt --to .  # one file from an older snapshot (id prefix)
+hidage restore --friends --to ~/out        # fetch it from your friends instead
+```
+
+**On a new machine**, after losing the old one:
+
+```sh
+hidage init --recover                      # type or paste your 24-word phrase
+hidage restore --friends --from hidage1:ahjp… --to ~/restored   # any one friend's card
+```
+
+This restores every folder you backed up, with its history, and your whole friend list
+(stored encrypted inside your backup), so you only needed one card. Each restored
+folder is a hidage repository again: `hidage backup` in it picks up where you left off
+and only renews what your friends already hold.
+
+## The nine commands
+
+```sh
+hidage init [--recover]           # set up this machine; --recover: from your phrase (stdin)
+hidage id [--card | --kit]        # your key, addresses and contact card (no passphrase);
+                                  #   --kit adds the recovery phrase and friends' cards
+hidage friend invite              # single-use invite, valid 24h (--give, --name, --valid)
+hidage friend add <invite|card>   # accept an invite (mutual) or add a contact card
+hidage friend set bob --give 200GiB   # change a nickname or the space you give
+hidage friend ls [-v]             # space both ways, last audit, last seen
+hidage friend rm bob [--purge]    # remove (and delete what you hold for them)
+
+hidage backup [folder]            # snapshot + send what changed to every reachable friend
+                                  #   (--local: snapshot only; --once: don't schedule it)
+hidage restore [snap] [path]      # --to, --list, --friends, --from <card>
+hidage log                        # history, newest first, marking what friends hold
+hidage log --diff a,b             # what changed between two snapshots
+hidage log --friends              # every backup your friends hold for you
+hidage forget <snap>...           # drop snapshots and free the space only they used
+hidage status [--audit]           # freshness, friends' health, fault tolerance;
+                                  #   non-zero exit when degraded
+hidage daemon [--install]         # scheduled backups + store and relay for friends
+```
+
+Inside a backed-up folder, commands find its `.hidage/` by walking up from the current
+directory, like git; elsewhere, pass `-C <dir>`. Snapshot ids can be shortened to any
+unambiguous prefix, and `latest` names the newest. Run `hidage <command> --help` for
+every flag.
+
+Everything else is a setting in `~/.config/hidage/config.toml`, which `init` writes
+with comments: the folders the daemon backs up and how often, redundancy, the space you
+give friends by default, how long their data is kept, how many old versions to keep,
+and network addresses.
+
+## What happens to your data
+
+1. **Snapshot.** Files are split into chunks at content-defined boundaries, so an edit
+   only changes the chunks around it. Chunks are encrypted with a key derived from your
+   recovery phrase and linked into a signed Merkle tree. An unchanged file costs
+   nothing to snapshot again, and the same file in two folders is stored once.
+2. **Pack and spread.** The encrypted objects are grouped into packs, and each pack is
+   erasure-coded into shards that go to different friends. A later backup sends only
+   the shards your friends don't already have.
+3. **Keep and renew.** Each friend holds your shards within the space they give you.
+   The daemon renews them daily; a backup nobody renews for 90 days is dropped. When a
+   new backup replaces an old one, the old data stays in the friend's trash for 30
+   days, so a compromised machine can't wipe your backups in one go.
+4. **Audit.** The daemon asks each friend to prove they hold randomly chosen shards and
+   records the result, which `hidage status` and `hidage friend ls` show.
+5. **History.** By default friends keep your last 3 versions of each folder, plus one a
+   day for a week and one a week for a month (`[retention]` in `config.toml`).
+
+Friends find each other directly, with no public network involved. Behind a home
+router, a node reaches its friends through a reachable friend's relay and then tries
+to connect directly by hole punching.
+
+For the key hierarchy, the encryption scheme, the formats and the garbage collector,
+see [`DESIGN.md`](DESIGN.md). For what an attacker or a malicious friend can and can't
+do, see [`THREAT_MODEL.md`](THREAT_MODEL.md).
+
+## Where things live
+
+| What | Where |
 |---|---|
-| `cmd/hidage` | CLI: snapshot/restore/diff/prune, recovery-code/recover, trust, serve/publish/net-restore/net-list, audit/reputation/accounting |
-| `internal/config` | config + data-store path resolution (`HIDAGE_STORE`) |
-| `internal/keyring` | root secret (wrapped under passphrase) → master key + identity; BIP39 recovery code |
-| `internal/identity` | Ed25519 keypair derived from the keyring (libp2p peer key) |
-| `internal/trust` | peer trust policy: whitelist / blocklist, consulted before reputation |
-| `internal/reputation` | per-peer audit pass/fail → recency-weighted (time-decayed), Laplace-smoothed score |
-| `internal/accounting` | per-peer space ledger + contribution-ratio enforcement |
-| `internal/crypto` | Argon2id KEK, key wrap/unwrap, deterministic content-addressed seal |
-| `internal/store` | `Store`; `FSStore` (meta) + `HardlinkStore` (pooled, cross-repo dedup) + `KeyedStore` |
-| `internal/chunk` | content-defined chunking (FastCDC) |
-| `internal/dag` | Merkle DAG: chunk/file/tree nodes (meta store) routed apart from chunk data |
-| `internal/repo` | versioned repository: `.hidage` layout, snapshots, restore, diff, prune, publish-set |
-| `internal/account` | account manifest: one identity's index of all its network backups |
-| `internal/shard` | Reed-Solomon erasure coding (`klauspost/reedsolomon`): any K of M shards reconstruct |
-| `internal/pack` | group objects into packs, erasure-code them, Release descriptor for reassembly |
-| `internal/p2p` | libp2p host (peer key = identity); object/push/audit/reputation protocols, Kademlia DHT, storage-offer rendezvous, signed head pointers |
-| `internal/netstore` | network-backed object source (DHT discover + fetch) for restoring from peers |
+| Settings | `~/.config/hidage/config.toml` |
+| Keyring: your root secret, wrapped under your passphrase | `~/.config/hidage/keyring.json` |
+| Friend list | `~/.config/hidage/friends.json` |
+| Per-folder history and metadata | `<folder>/.hidage/`, travels with the folder like `.git` |
+| File data, yours and your friends' | `~/.local/share/hidage/store` |
+
+Put the store on a roomy disk with `store` in `config.toml` or `HIDAGE_STORE`, and
+exclude it from other backups. It must be on a single filesystem that supports hard
+links, which is how identical chunks are shared across folders.
+
+## Try it on one machine
+
+Three people on one computer: Bob keeps a backup for Alice, then Alice recovers it on
+a "new laptop" with only her recovery phrase and Bob's card.
+
+```sh
+export HIDAGE_PASSPHRASE='correct horse battery staple'
+as() { who=$1; shift; XDG_CONFIG_HOME=$PWD/$who/cfg XDG_DATA_HOME=$PWD/$who/data "$@"; }
+
+as bob hidage init
+as bob hidage daemon --listen /ip4/127.0.0.1/tcp/4102 &
+
+as alice hidage init
+as alice hidage friend add "$(as bob hidage friend invite | grep ^hidage1:)"
+mkdir -p alice/docs && echo hello > alice/docs/a.txt
+head -c 3000000 /dev/urandom > alice/docs/big.bin
+as alice hidage backup --once alice/docs          # sends 30 shards to Bob
+as alice hidage id --kit > kit.txt                # the phrase and Bob's card
+
+sed -n '/^Recovery phrase:/{n;p}' kit.txt | as laptop hidage init --recover
+as laptop hidage restore --friends --from "$(grep -m1 '^ *hidage1:' kit.txt)" --to restored
+cmp restored/docs/big.bin alice/docs/big.bin && echo "recovered from Bob"
+kill %1
+```
+
+With a single friend there is no fault tolerance, and `backup` says so. Add a third
+person, and the shards spread over both friends.
 
 ## Known limitations
 
-> **Security & incentives:** confidentiality and integrity are cryptographic and strong;
-> the storage *economy* (free-rider/Sybil resistance, audit guarantees) is best-effort on
-> the open network and robust mainly in the **friend-to-friend (trusted-peer)** regime.
-> See [`THREAT_MODEL.md`](THREAT_MODEL.md) for the full adversarial analysis.
+- **One reachable friend is needed.** Nodes behind a NAT connect through a friend's
+  relay, and relays only work on a node with a public address. At least one friend
+  needs a forwarded port, a small VPS running `hidage daemon`, or an overlay network
+  such as Tailscale or WireGuard. See `reachability` in `config.toml`.
+- **Restoring needs enough friends online.** At the default 2x redundancy, friends
+  holding at least half of a backup's shards must be reachable.
+- **Small changes still re-send a fair share.** Changing one file in a 30 MB folder
+  re-sends about a quarter to a third of its shards, because packs are erasure-coded
+  as a whole. The fraction shrinks as folders grow.
+- **One writer per folder.** Backing up the same folder from two devices is not
+  supported; there is no conflict resolution.
+- **The cached identity key.** So the daemon can serve friends while locked, your node
+  identity is stored unencrypted in `~/.config/hidage/identity.key` (readable only by
+  you). It can't decrypt backups, but whoever reads it can pose as you to your friends.
+- **No forward secrecy at rest.** A leaked master key decrypts every snapshot it ever
+  encrypted.
+- **Not anonymous.** Friends see each other's IP addresses.
 
+## What's next
 
-- **Peer selection** — `--peer` names hosts explicitly, `--trusted` spreads to your trusted
-  peers (friend-to-friend), and `--open` discovers untrusted storage nodes via a rendezvous
-  tag (ranked by reputation, Bad/Blocked excluded). `--open` is **best-effort** — handing
-  data to strangers is the Sybil-exposed mode (see [`THREAT_MODEL.md`](THREAT_MODEL.md));
-  use `--trusted` for anything important. Erasure coding only helps across enough distinct
-  peers, so `--min-peers` guards against (and a single-peer publish warns about)
-  configurations with no fault tolerance.
-- **Pseudonymous, not IP-anonymous** — peers are identified by public key, but their IP
-  addresses are visible to peers they connect to (network-level anonymity is out of scope).
-- **Single-writer** — snapshots assume one owner per repository; concurrent writers from
-  multiple devices (conflict resolution) are not handled.
-- **No at-rest forward secrecy** — a leaked user master key decrypts every snapshot in
-  every repository it encrypted.
-- **Data store needs one Unix filesystem** — cross-folder dedup uses hard links, so the
-  pool and per-repo references must live on a single hard-link-capable filesystem.
+- A Tor transport, for friends who don't want to expose their IP address or can't get
+  a reachable node.
+- Getting data back from a friend's trash after a bad backup replaced the good one.
+- Backing up from several devices under one identity.
 
-## Roadmap
+## Development
 
-- **Phase 1 — local crypto/coding core.** ✅ Done. Client-side encryption, the
-  content-addressed store, and the erasure-coding primitive (`internal/shard`).
-- **Phase 2 — versioned storage core.** ✅ Done. The repository: content-defined chunking
-  + Merkle DAG + signed snapshots, so updating/changing/removing files re-stores only the
-  delta, with history and prune/GC.
-- **Phase 3 — networking + trust + recovery.** ✅ Done. Recovery code (`recovery-code` /
-  `recover`); trust/whitelist policy (`trust …`); a **libp2p** node (`serve`) keyed by the
-  Ed25519 identity with object + push protocols and a **Kademlia DHT**; `publish`
-  replicates a snapshot's objects (bytes, DAG nodes, chunks) to trusted peers and posts a
-  **signed head pointer**; `net-restore` rebuilds a backup from the network with only the
-  recovery phrase + a bootstrap peer.
-- **Phase 4 — reputation + redundancy.** ✅ Done. Proof-of-storage **audits** (challenge a
-  peer to prove it still holds a shard, signed receipt) feed a per-peer **reputation**
-  score; a **space-accounting** ledger enforces the 2–4× contribution ratio on accepted
-  pushes; and a snapshot is **erasure-coded** (`internal/pack` + Reed-Solomon) into shards
-  spread across peers, so it survives the loss of any minority of them.
+```sh
+go build ./... && go vet ./... && go test ./...
+```
 
-> A paid storage service is **only an idea, not a planned feature.** The chosen
-> primitives (signed pubkey identities + trust policy, content-addressed verifiable
-> shards, audit-backed reputation) are deliberately enough to make one *possible* later
-> without any market-specific work in scope today.
+The tests cover the crypto, chunking, the stores and the repository, plus multi-node
+networking: pairing, relaying, audits, quota refusal, and recovery from the surviving
+friends after one is killed.
+
+| Path | Responsibility |
+|---|---|
+| `cmd/hidage` | the CLI and the daemon |
+| `internal/config` | `config.toml`, file and data-store locations |
+| `internal/keyring` | root secret wrapped under the passphrase; recovery phrase |
+| `internal/identity` | Ed25519 identity derived from the keyring (the libp2p peer key) |
+| `internal/crypto` | Argon2id, key wrapping, deterministic encryption |
+| `internal/chunk` | content-defined chunking (FastCDC) |
+| `internal/dag` | Merkle tree of chunks, files and directories |
+| `internal/store` | object stores, with hard-link deduplication across folders |
+| `internal/repo` | per-folder repository: snapshots, restore, diff, forget, retention |
+| `internal/pack`, `internal/shard` | packing and Reed-Solomon erasure coding |
+| `internal/account` | the index of all your backups, and your encrypted friend list |
+| `internal/friends` | friend list, contact cards and invites |
+| `internal/hosting` | friends' data held here: quotas, trash, leases |
+| `internal/p2p` | libp2p node: friend-only protocols, relays, hole punching |
+| `internal/netstore` | fetching objects from friends when restoring |

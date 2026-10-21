@@ -27,8 +27,8 @@ Everything derives from one secret:
   public key is the node's pseudonymous identity (and future libp2p peer key); the private
   key signs snapshots. It is *derived*, not stored separately.
 - **Recovery code** — the root encodes to a 24-word **BIP39** mnemonic (`hidage
-  recovery-code`). Because both the master key and the identity derive from the root, this
-  single phrase backs up the entire node's secrets; `hidage recover` rebuilds the keyring
+  id --kit`). Because both the master key and the identity derive from the root, this
+  single phrase backs up the entire node's secrets; `hidage init --recover` rebuilds the keyring
   from it on a fresh machine (under a new passphrase).
 
 ### Content-addressed stores (`internal/store`)
@@ -63,7 +63,7 @@ it):
   objects/<id>         # meta store: encrypted DAG nodes (file/tree), small
   snapshots/<id>.json  # one signed snapshot root per version
 
-$HIDAGE_STORE (default /opt/hidage/store)
+<data store>  (default ~/.local/share/hidage/store)
   pool/<id>            # one canonical encrypted copy of each chunk (the bulk)
   refs/<repoID>/<id>   # this repo's hard links into the pool — its reference set
 ```
@@ -71,8 +71,9 @@ $HIDAGE_STORE (default /opt/hidage/store)
 `Init` writes `.hidage/` and its marker config; `Open` reads it. Both take the user
 master key (loaded once via `internal/keyring`) and the data-store path. `Find` locates a
 repository by walking up from the current directory, so commands work git-style from
-anywhere inside a tracked folder; `snapshot` auto-creates `.hidage/` on first use. The
-data store path comes from `$HIDAGE_STORE` or the `/opt/hidage/store` default; a
+anywhere inside a tracked folder; `backup` auto-creates `.hidage/` on first use. The
+data store path comes from `$HIDAGE_STORE`, else `store` in `config.toml`, else an existing
+legacy `/opt/hidage/store`, else `$XDG_DATA_HOME/hidage/store`; a
 permission failure there yields actionable setup guidance.
 
 ### Content-defined chunking (`internal/chunk`)
@@ -175,7 +176,7 @@ so cost is proportional to the change, not the tree size. It reports each path a
 added / removed / modified.
 
 ### Prune / GC (`Repo.Forget`, `Repo.Prune`)
-`forget` deletes a snapshot's root record. `prune` then mark-sweeps **both stores**: it
+`Repo.Forget` deletes a snapshot's root record; `Repo.Prune` (run by `hidage forget` right after) mark-sweeps **both stores**: it
 computes the set of `CipherID`s reachable from *every surviving snapshot in this repository*
 (root → trees → files → chunks) and deletes any object — meta node or data ref — not in
 that set. Objects shared with a surviving snapshot are retained, so pruning one version
@@ -189,122 +190,174 @@ cross-repository coordination or registry is needed — the filesystem refcount 
 
 ---
 
-## Trust policy (`internal/trust`)
+## Friend list (`internal/friends`)
 
-A node keeps a local policy of peer public keys it has an opinion about, in
-`~/.config/hidage/trust.json` (no secrets — just public keys). When the networking
-layer decides whether to place shards on a peer or accept them from one, it consults the
-policy first:
+A node keeps the list of its friends in `~/.config/hidage/friends.json` (no secrets):
+per friend, the Ed25519 public key, a local nickname, the last known addresses, the quota
+this node gives them, and when it last saw them. hidage is friends-only, so this list is
+the whole trust model: `daemon` refuses inbound connections from any other key (a libp2p
+connection gater checked once the remote is authenticated) and accepts pushes only from
+friends, and `backup` publishes to friends.
 
-```
-Blocked  → never interact (overrides everything)
-Trusted  → interact regardless of reputation (friend-to-friend, à la Syncthing pairing)
-Neutral  → defer to the reputation score (Phase 4)
-```
-
-`Verdict(pubkey)` returns one of those three; trusted and blocked are mutually exclusive
-(trusting a key clears any block and vice-versa). Managed via `hidage trust
-add/remove/block/unblock/list`. The decision is a pure function of `(pubkey, policy)` plus
-the future reputation score, so it is fully testable before any networking exists and
-simply becomes load-bearing once peers are real. The networking layer consults it when
-accepting pushed objects.
+Friends are added from a **contact card**, `hidage1:` + base32 of a compact binary payload
+(public key, suggested nickname, multiaddrs) with a 4-byte SHA-256 checksum so a damaged
+copy-paste is caught. `hidage id` prints the node's card (from the running node's actual
+addresses, published in `node.json`, or else from `listen` in `config.toml`); `hidage friend
+add <card>` adds the friend or refreshes their addresses. **Invites** make pairing one step: `friend invite` stores a random 16-byte token (only its
+hash is kept, with an expiry, 24 h by default) and prints this node's card with the token
+appended. `friend add <invite>` adds the inviter and presents the token over
+`/hidage/pair/1.0.0` along with its own card; the inviter's node checks that the card is the
+requester's own key, consumes the token and adds the invitee, so the friendship is mutual.
+If the inviter's node can't be reached yet, the invitee's running node retries until the
+invite expires. While an invite is open the inviter's node lets unknown peers connect, but
+serves them only pairing: head records, friends' address records and hosting all check
+friendship. A legacy `trust.json` is imported
+once (trusted keys become friends without addresses; blocked keys are dropped). The list
+is re-read when its file changes, so `friend add/rm` applies to a running node.
 
 ---
 
 ## Networking (`internal/p2p`, `internal/netstore`)
 
+**Reaching friends across NATs.** Nodes listen on TCP and QUIC (IPv4 and IPv6) and try, in
+order: a direct connection (UPnP/NAT-PMP port mapping helps home routers), then a
+connection through a **friend's circuit relay**, which DCUtR hole punching then tries to
+upgrade to a direct one. `daemon` offers the relay service to friends only (an ACL over both
+ends of the circuit) and with no time or data limit, so a relayed link can carry backup
+data when hole punching fails. A node that decides it is behind a NAT reserves slots on
+friends' relays and advertises `/p2p/<relay>/p2p-circuit` addresses, which end up in its
+contact card. `reachability` in `config.toml` controls the decision: `auto` (the default)
+treats a node with no public IP on any interface as private, rather than waiting for
+AutoNAT, which needs several peers to agree and so can stay undecided in a small group;
+`public` (port forwarded) and `private` override it. libp2p only advertises circuit
+addresses through relays with a public IP, so at least one friend must be reachable; a
+small VPS running `daemon` works as the group's relay, and overlay networks (Tailscale,
+WireGuard, ZeroTier) work as plain addresses.
+
 A node is a **libp2p host whose peer ID is its Ed25519 identity** (so a recovered node has
-the same peer ID as the original). It speaks three things:
+the same peer ID as the original). There is no global discovery (no DHT): a node talks
+only to the friends in its list, and they are few enough to ask directly. It speaks:
 
 - **Object protocol** (`/hidage/object/1.0.0`) — request an object by content address,
-  receive its bytes. Objects are already encrypted/signed, so serving to anyone is safe.
+  receive its bytes. Objects are already encrypted/signed. A restoring node asks its
+  reachable friends in turn.
 - **Push protocol** (`/hidage/push/1.0.0`) — replicate a snapshot's objects to a peer that
   agrees to store them. The receiver identifies the sender from the secured connection's
-  public key and consults its **trust policy** (store unless `Blocked`), then re-announces
-  what it stored to the DHT.
-- **Kademlia DHT** (`/hidage` prefix) — `Provide`/`FindProviders` map an object's content
-  address (a raw CIDv1 over its SHA-256) to the peers holding it, and a **signed head
-  pointer** (`/hidage/<ownerpubkey>` → an **account-manifest** content address) lets a peer
-  find *all* of an owner's backups with no local state. A namespaced record validator
-  verifies the head signature on put and get and selects the newest.
+  public key and stores only for **friends**.
+- **Head protocols** (`/hidage/head/1.0.0`, `/hidage/head-get/1.0.0`) — a **signed head
+  pointer** names the owner's **account-manifest** content address, so the owner can find
+  *all* of its backups with no local state. The owner pushes it to its friends on every
+  publish (a friend stores it only if the sender is the key that signed it); a recovering
+  owner asks its friends for it back (they answer only the owner's key) and keeps the newest
+  valid one.
+- **Address protocol** (`/hidage/addr/1.0.0`) — each node signs a record of its current
+  addresses (with a timestamp sequence number). A friend can ask a node for its own record
+  or for the last record it holds of another of its friends, so a friend whose address
+  changed can still be found through the others. Records are verified against the
+  subject's key and only a newer one replaces an older one. `daemon` reconnects to friends
+  every few minutes and refreshes their records.
 
 An owner can back up many folders under one identity, so the head doesn't name a single
 backup — it names an **account manifest** (`internal/account`): a small object listing one
 entry per repository (`repoID`, name, current Release id). It needs no signature of its
 own — the signed head endorses its content address, and the fetcher verifies that address.
 
-`publish` gathers a snapshot's object closure (`repo.PublishSet`: snapshot bytes + every
+Publishing (`backup`, or the daemon) gathers a snapshot's object closure (`repo.PublishSet`: snapshot bytes + every
 reachable DAG node + chunk), **erasure-codes** it (below), and spreads the resulting shards
-round-robin across the chosen peers, from three sources: `--peer` (explicit multiaddrs),
-`--trusted` (every trusted key found online via the DHT — `PeerIDFromPubKeyHex` +
-`DialPeerID`), and `--open` (untrusted nodes discovered through a **storage-offer rendezvous
-tag** that `serve` advertises — `FindStorageProviders`, then ranked by reputation with
-Bad/Blocked excluded and capped at `--open-peers`). With `--transitive`, strangers you
-haven't audited are ranked by **depth-1** opinions from your *anchors* — your trusted
-peers plus your Good peers — queried over `/hidage/reputation/1.0.0` and combined as a
-weighted average where each anchor's opinion is discounted by your own rating of it. It's
-a soft prior for ordering only: it never overrides a `Bad`/`Blocked` verdict or your own
-audits, and depth-1 + anchoring bounds the collusion surface to peers you already trust. Since the coding only helps across
+round-robin across every reachable friend (dialed at stored addresses, then at addresses
+learned from other friends), or the explicit `--peer` multiaddrs instead. Since the coding only helps across
 enough *distinct* peers, it reports the fault tolerance and `--min-peers` guards thin
 configurations. It then fetches the current account manifest,
 upserts this repo's
 entry (replacing it by `repoID`, never clobbering siblings), pushes the new Release + the
-new manifest to every peer, and points the head at the manifest. `net-restore` resolves the
+new manifest to every peer, and hands every friend reached a new signed head naming the
+manifest. `restore --friends` resolves the
 head → fetches + verifies the manifest → selects a backup (`--repo <name>` / `--all` / the
 sole entry) → fetches that Release, gathers K-of-M shards per pack from whoever still has
 them, rebuilds the objects, and runs the ordinary restore walk against a local cache.
-(`net-list` just prints the manifest.) Resolving and publishing wait for the DHT routing
-table to populate (`WaitForPeers`) so a republish never reads a stale/empty manifest.
+(`log --friends` just prints the manifest.) On a machine with no friend list yet, `--from
+<contact card | multiaddr>` names a friend to recover from.
 
 ---
 
-## Durability: audits, reputation, accounting, erasure coding
+## The daemon (`hidage daemon`)
 
-These keep distributed data recoverable and keep peers honest.
+One long-running process does everything that has to happen while you are not looking:
+it hosts friends' sets and answers their object, audit and head requests, relays for them,
+reconnects to them every few minutes (refreshing address records and completing pending
+pairings), reaps expired sets and old trash hourly, and, with the keyring unlocked, backs
+up the `folders` listed in `config.toml`: every `backup.every` it snapshots each folder if
+it changed (`SnapshotIfChanged`, so idle folders don't pile up identical snapshots),
+publishes when the snapshot changed or the last publish is older than `renew_every`
+(renewal sends only the set's list, see below), and audits friends whose last audit is
+older than `audit_every`.
+
+Backups need the master key; hosting needs only the identity key. The passphrase comes
+from `HIDAGE_PASSPHRASE`, `passphrase_command` or the terminal; on every unlock the daemon
+caches the identity seed in `identity.key` (0600). A later start with no passphrase source
+(e.g. at boot) runs **locked** from that cache: it keeps hosting for friends but takes no
+backups, and records this in `node.json` so `status` can say so. `daemon --install` writes a
+systemd user unit or launchd agent.
+
+## Durability: hosting, audits, erasure coding
+
+These keep distributed data recoverable and make problems visible.
+
+- **Hosted sets** (`internal/hosting`, push protocol `/hidage/push/2.0.0`) — a node keeps
+  each friend's data in that friend's own directory. An owner publishes a repository by
+  replacing its **set** on each friend (the set id is an HMAC of the repo id under the
+  master key, so hosts can't link it to the repo): it lists the set's objects with their
+  sizes, the host answers which ones it lacks and whether the result fits, only those are
+  sent, and the host commits the new list. Renewing an unchanged backup therefore sends
+  only the list. The **quota** is the space the host gives that friend (`friend set
+  --give`), checked against the bytes the friend would actually hold afterwards, so
+  repeated renewals never inflate it. Objects no set lists any more move to a per-friend
+  **trash** and are deleted after `hosting.trash_days`, so a compromised owner machine that
+  publishes garbage can't wipe its remote copies at once. A set not renewed within
+  `hosting.lease_days` is dropped (its owner has gone away). Object and audit requests are
+  answered from the requester's own data, live or in trash.
 
 - **Proof-of-storage audits** (`/hidage/audit/1.0.0`, `internal/p2p`) — a node that holds
   the original challenges a peer with a shard id + fresh random nonce; the peer must return
   `SHA-256(nonce || shardBytes)` (only computable with the bytes), signed by its identity,
   within a short response **deadline** (a soft defense against fetching the shard from
-  elsewhere on demand). The challenger verifies the proof and signature. `publish` records
-  which shards went to which peer (`.hidage/distribution.json`); `audit` regenerates the
-  shards deterministically and samples each peer's assigned shards. A failed audit lowers
-  reputation **and revokes that peer's accounting credit** (so accept-then-delete costs it
-  its storage budget with you).
-
-- **Reputation** (`internal/reputation`) — audit outcomes accumulate per peer into a
-  **recency-weighted** (exponential decay, ~30-day half-life), Laplace-smoothed pass rate,
-  kept **local and self-written** (your view = your own audits; not gossiped, so Sybils
-  can't inject standing). Decay means recent audits dominate: banked old passes can't mask
-  a recent failure, and a peer not audited in a long time fades back toward *unproven*. The
-  trust policy's *neutral* verdict defers here: a peer is used unless it is *proven bad*
-  (enough recent history and a low score); unproven/little-history peers are still used.
-  `publish` filters target peers through `trust` then reputation.
-
-- **Space accounting** (`internal/accounting`) — a per-peer ledger of bytes stored *for
-  them* vs. *by them*. On accepting a push, a node enforces a contribution ratio: it stores
-  for a peer at most `ratio × what they store for us + a free quota` (defaults 3×, 1 GiB).
-  `TheyStoreForUs` is only ever written by your own `publish`, so it can't be spoofed. This
-  is the mechanism behind "contribute 2–4× to consume 1×".
-
-- **Storage leases** (`serve --lease`, `store.KeyedStore.Reap`) — hosted shards carry a
-  lease (file mtime); a node periodically reclaims any not renewed within the window. A
-  re-publish rewrites the same (deterministic) shard ids, refreshing their leases, so an
-  owner who keeps publishing keeps their data and one who abandons it is reclaimed.
+  elsewhere on demand). The challenger verifies the proof and signature. Publishing records
+  which shards went to which peer (`.hidage/distribution.json`); auditing regenerates the
+  published release deterministically and samples each friend's assigned shards. The
+  outcome is kept per friend in `friends.json` and shown by `status` and `friend ls`.
 
 - **Erasure-coded redundancy** (`internal/shard`, `internal/pack`) — objects are grouped
-  into ≤8 MiB **packs**; each pack is Reed-Solomon coded (`klauspost/reedsolomon`) into M
-  shards of which **any K reconstruct** it. Shards are spread round-robin across peers, so
-  losing a minority of peers loses < M−K shards per pack and the data still recovers — at
-  a fraction of the cost of M full replicas. *(Reed-Solomon replaced an earlier fountain-
-  code library that silently returned corrupt output at some parameters.)*
+  into **packs** of 1–8 MiB; each pack is Reed-Solomon coded (`klauspost/reedsolomon`) into M
+  shards of which **any K reconstruct** it, at a fraction of the cost of M full replicas.
+  *(Reed-Solomon replaced an earlier fountain-code library that silently returned corrupt
+  output at some parameters.)*
+
+- **Stable packing** — so that a republish after a small change sends little, and versions
+  share shards: objects are packed in id order with **content-defined boundaries** (past
+  1 MiB, an object ends its pack with probability proportional to its size, so boundaries
+  fall about every 2 MiB and depend only on the object; forced at 8 MiB), and objects under
+  64 KiB (snapshots, tree and file nodes, which every snapshot changes) are packed apart
+  from bulk chunks. Changing one file then rewrites the metadata pack and the data packs
+  around its chunks, not the whole release. Shards are **placed** by rendezvous hashing per
+  pack (peers ranked by a hash of pack and peer, shards dealt in that order), so the same
+  release and friends always give the same placement, a pack spreads over as many friends
+  as possible, and losing a minority of them loses < M−K shards per pack.
+
+- **Versions with friends** — publishing sends every snapshot the `[retention]` policy keeps
+  (newest `keep_last`, plus the newest per day for `keep_daily` days and per week for
+  `keep_weekly` weeks), not just the latest. Each version's Release is cached locally
+  (`.hidage/releases/`), so older versions are listed without rebuilding and their shards
+  are rebuilt (with the redundancy recorded in the Release) only if a friend lacks one.
+  The account manifest lists them (`Entry.History`), and recovery imports them, so history
+  survives losing the machine. The daemon applies the same policy to local snapshots after
+  each new one; `forget --retention` does it by hand.
 
 ---
 
 ## Threat model & guarantees
 
 A summary here; the full adversarial analysis — free-rider/Sybil resistance, audit limits,
-eclipse, whitewashing, and the friend-to-friend vs. open-network regimes — is in
+eclipse, whitewashing, and the friends-only trust model — is in
 [`THREAT_MODEL.md`](THREAT_MODEL.md).
 
 - **Confidentiality:** all stored objects are encrypted client-side; a host holding them
@@ -326,18 +379,19 @@ Everything originally deferred past the local storage core is now built, except 
 explicitly marked out of scope:
 
 - **Networking** — ✅ *implemented* (`internal/p2p`, `internal/netstore`, see above):
-  libp2p host, object/push protocols, Kademlia DHT, signed head pointers.
-- **Trust / whitelist** — ✅ *implemented* (`internal/trust`): prefer or block specific keys
-  before reputation; consulted when accepting pushes.
+  libp2p host, object/push/head/address protocols between friends, NAT traversal.
+- **Friend list** — ✅ *implemented* (`internal/friends`): contact cards, friends-only
+  connections and pushes.
 - **Disaster recovery** — ✅ *implemented* (see below): recover from the network with only
-  the recovery phrase + a bootstrap peer.
-- **Reputation, audits, accounting** — ✅ *implemented* (`internal/reputation`,
-  `internal/accounting`, audit protocol; see "Durability" above).
+  the recovery phrase + one friend's contact card.
+- **Hosting, audits** — ✅ *implemented* (`internal/hosting`, audit protocol; see
+  "Durability" above). The earlier reputation scores and contribution-ratio ledger were
+  removed: between friends, a stated quota and the last audit result say more.
 - **Erasure-coded redundancy** — ✅ *implemented* (`internal/shard` Reed-Solomon +
   `internal/pack`; see "Durability" above).
-- **Storage market** — *not built.* Nodes can be discovered (`publish --open` via the
-  rendezvous tag) and ranked by reputation, but there is no pricing/payment/contract layer;
-  a paid market remains deliberately out of scope.
+- **Storage from strangers / storage market** — *removed / out of scope.* hidage backs up
+  to friends only (see [`docs/friends-only.md`](docs/friends-only.md)); there is no
+  discovery of untrusted storage and no pricing/payment/contract layer.
 - **Network-level anonymity** (hiding IPs via onion/mixnet routing) — *out of scope.*
 
 ### Disaster recovery — rebuild from the network with no local state
@@ -348,31 +402,40 @@ with the master key (`fp` for each object is carried in its parent):
 
 ```
 head pointer ──▶ snapshot ──▶ root Ref ──▶ tree nodes ──▶ file nodes ──▶ chunk Refs
- (DHT, by         pull+verify    decrypt      decrypt        decrypt      pull + decrypt
-  owner pubkey)   (signature)
+ (from friends,    pull+verify    decrypt      decrypt        decrypt      pull + decrypt
+  owner-signed)    (signature)
 ```
 
 The three things this needs — all now in place:
 
 1. **Distribute snapshots and DAG nodes, not just chunks.** ✅ `repo.PublishSet` gathers a
    snapshot's whole closure — the signed snapshot bytes, every reachable DAG node, and
-   every chunk — and `publish` replicates all of it, so the recipe travels with the data
+   every chunk — and publishing replicates all of it, so the recipe travels with the data
    rather than dying with the original `.hidage`.
 
 2. **Make the keys recoverable.** ✅ Both the master key and the identity derive from a
-   single 32-byte root, exportable as a 24-word BIP39 phrase (`recovery-code`) and
+   single 32-byte root, exportable as a 24-word BIP39 phrase (`id --kit`) and
    restorable with `recover`.
 
-3. **Find all backups with zero local state.** ✅ An IPNS-style **signed head pointer** in
-   the DHT, keyed by the owner's public key (`pubkey → account-manifest id`, signed by the
-   identity key), posted on `publish`. Recovery needs only the identity (from the recovery
+3. **Find all backups with zero local state.** ✅ A **signed head pointer**
+   (`account-manifest id`, signed by the identity key), handed to every friend on
+   publish and returned only to the owner's key. Recovery needs only the identity (from the recovery
    code) to locate the head, and the manifest enumerates every repository — no snapshot or
    repo id to remember.
 
+**Recovery continuity.** The account manifest also carries the owner's **friend list**,
+sealed under a key derived from the master key (`account.SetRoster`), so friends can't
+read it. A new machine that reaches one friend (`--from`) learns all the others from it and
+asks them too. Each restored folder is then **adopted** (`repo.Adopt`): `.hidage/` is
+rebuilt with the original repo id, the signed snapshot byte for byte, and its DAG nodes and
+chunks, so a re-publish regenerates identical shards and only renews what friends already
+hold. `--files-only` restores files without adopting.
+
 **Minimal recovery seed.** Recovering an arbitrarily large dataset needs only a tiny
 off-machine secret plus a way onto the network: the **24-word recovery phrase** (which
-reproduces both the master key and the identity) and at least one **bootstrap peer**. From
-there `net-restore` does: identity → DHT head lookup → fetch+verify snapshot → walk the
-DAG, pulling and decrypting nodes and chunks from providers → reassemble.
+reproduces both the master key and the identity) and one **friend's contact card**
+(`--from`). From there `restore --friends` does: identity → ask friends for the head → fetch +
+verify the manifest and release → gather K-of-M shards from friends → reassemble → walk
+the DAG, decrypting nodes and chunks.
 
 See the [README roadmap](README.md#roadmap) for phase ordering.

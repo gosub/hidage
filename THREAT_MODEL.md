@@ -7,7 +7,7 @@ adversarial gaps** — honestly, so nothing is relied on that shouldn't be. See
 ## Roles
 
 - **Owner** — backs up their own folders; publishes shards, audits, recovers.
-- **Storage peer** — runs `serve`, holds other people's encrypted shards.
+- **Storage peer** — runs `daemon`, holds other people's encrypted shards.
 - Every node is identified by an **Ed25519 public key**, which is also its libp2p
   peer ID. Identities are free to create.
 
@@ -27,65 +27,44 @@ adversarial gaps** — honestly, so nothing is relied on that shouldn't be. See
   owner's backups can be found and trusted from their public key alone.
 - **Durability.** Reed-Solomon erasure coding spreads M shards across peers so any
   K reconstruct — surviving the loss of a minority. Proof-of-storage **audits**
-  detect peers that drop data; **reputation** steers future placement away from
-  them.
+  detect friends that drop data; `status` reports when that leaves the backup
+  without enough fault tolerance.
 
-## Trust model — two regimes
+## Trust model — friends only
 
-hidage has two modes, with very different guarantees:
-
-1. **Friend-to-friend (strong).** You `trust add` the public keys of people you
-   know and publish only to them. The incentive/Sybil problems below largely
-   evaporate, because participation is gated by out-of-band social trust. **This
-   is the mode to rely on for important data.**
-2. **Open network (best-effort).** Publishing to/serving strangers. Confidentiality
-   and integrity still hold, but the *economic* guarantees are weak — see below.
+hidage is backup **with friends**: you `friend add` the contact cards of people
+you know, publish only to them, and `daemon` refuses inbound connections from
+anyone else (a connection gater on the authenticated peer key). There is no
+discovery of, or publishing to, strangers' storage. The incentive/Sybil problems
+below are therefore largely moot: they apply only to a friend misbehaving, and
+are listed for that case (see [`docs/friends-only.md`](docs/friends-only.md)).
 
 ## Known adversarial gaps
 
 These are real and (mostly) unsolved. They affect availability/economics, **not**
 confidentiality or integrity.
 
-### Free-riding via the free quota
-`serve` extends every peer a `--free` quota (default 1 GiB) before requiring
-reciprocation. A node that serves stingily (`--ratio 0 --free 0`) but publishes
-widely can extract `free × (#hosts)` of storage for nothing. The free quota is a
-deliberate cold-start credit line (you can't bootstrap reciprocity without it);
-the cost is bounded free-riding. Tunable via `--free`, but there is no full fix in
-the open network.
+### Free-riding
+Each friend gets the space you give it (`friend set --give`), whether or not it gives
+you space back; `friend ls` shows both directions so imbalance is visible, and
+fixing it is a conversation, not a protocol.
 
 ### Sybil attacks
-Identities are costless, so an attacker can mint many and multiply the per-identity
-free quota — the dominant Sybil lever. What is **not** vulnerable: reputation and
-accounting are **local and self-written** (your view = your own audits; credit is
-only written by your own `publish`), so Sybils cannot inflate their standing with
-you or trick your `serve` into over-accepting beyond `free`. Residual risks:
-**eclipse** (many Sybil IDs crowding a victim's DHT key to censor discovery —
-redundancy limits data loss but not censorship) and **whitewashing** (a peer with
-bad reputation discards its identity and rejoins clean with a fresh free quota).
-The robust mitigation is the friend-to-friend regime; costly identities
-(proof-of-work/stake) are out of scope.
+Identities are costless, but with the friends-only model (no DHT, no free quota,
+inbound connections only from friends) a minted identity has no way in: it is
+useless until someone adds its contact card.
 
-`publish --open` is the entry point to this exposure: it hands shards to *discovered
-strangers*. It is gated — Bad/Blocked peers are excluded, candidates are ranked by
-your own reputation of them, the count is capped (`--open-peers`), and shards are
-encrypted — but it is explicitly **best-effort**. For data you can't afford to lose,
-use `--peer`/`--trusted`.
+### Stolen identity cache
+`identity.key` lets the daemon host for friends without the passphrase. It cannot decrypt
+backups, but whoever reads it can act as you towards your friends: publish over your
+backups (bounded by their trash) and fetch your (encrypted) data. Keep it like an SSH key;
+deleting it only means a locked daemon can't start until you unlock once.
 
-### Transitive reputation (`--transitive`)
-Discovered strangers you've never audited are *unproven*, so plain reputation ranking
-mostly orders the few peers you know ahead of the rest. `publish --transitive` improves
-this by asking your **anchors** — trusted peers plus your Good peers — for *their*
-opinion of a stranger (`/hidage/reputation`), combined as a weighted average discounted
-by your own rating of each anchor. It is deliberately constrained: **depth-1** (no
-friends-of-friends), **anchored** (only peers you already trust/rate can influence it),
-a **soft prior** (it reorders candidates but never overrides `Bad`/`Blocked` or your own
-audits), and opt-in. Even so it reintroduces a *bounded* version of the gossip surface
-the local-only model avoids: an opinion is **self-reported** (an anchor could lie — but
-only your chosen anchors are consulted, and only to *rank*, not to gate), and querying
-leaks your interest in a peer to your anchors. Net: it trades a little of the local-only
-Sybil isolation for better ranking of open-network strangers, scoped so the worst case
-is "an anchor I trusted misranked a candidate," never silent data loss.
+### Leaked invites
+An invite lets whoever holds it pair once until it expires (24 h by default), like an
+invite link: send it privately. `friend ls` shows every friend and `friend rm` revokes one.
+While any invite is open, `daemon` accepts connections from unknown keys, but answers them
+only on the pairing protocol.
 
 ### Audit outsourcing
 The audit proves *someone* holds the bytes, not that *this* peer does. A lazy peer
@@ -96,35 +75,37 @@ objects can still be outsourced within the window. True proof-of-replication is 
 implemented.
 
 ### Accept-then-delete
-A peer can accept your shards (earning storage credit) then delete them. Audits
-catch this: a failed audit drops the peer's reputation *and* revokes its accounting
-credit with you, so it can no longer push to your `serve`. The catch is that
-detection is **only as frequent as you run `hidage audit`** — between audits, your
+A friend can accept your shards then delete them. Audits catch this: a failed audit
+is recorded against the friend and `status` flags it (and whether the backup is still
+rebuildable); the response is social, plus re-publishing. The catch is that
+detection is **only as frequent as audits run** (`audit_every` in the daemon, or
+`hidage status --audit`) — between audits, your
 redundancy can silently degrade. Mitigate by auditing on a schedule and publishing
 at `--redundancy` high enough to tolerate some silent loss.
 
-### Reputation recency
-Scores are **recency-weighted**: audit evidence decays exponentially (≈30-day
-half-life), so banked old passes can't mask a recent failure and a peer not
-audited in a long time fades back toward *unproven* (prompting a fresh audit).
-Residual: the half-life is a fixed constant, not adaptive to your audit cadence,
-and reputation is still only as current as your last `hidage audit`.
-
 ### Head-pointer rollback
-Head records are owner-signed and newest-wins, but an eclipsing peer could serve an
-older *valid* signed head, resolving a recoverer to an older release (stale, not
-corrupt). Bounded by the same eclipse difficulty.
+Head records are owner-signed and newest-wins across all reachable friends, but a
+friend can withhold its record or serve an older *valid* one, resolving a recoverer
+to an older release (stale, not corrupt). It goes unnoticed only if every friend
+reached is stale.
 
 ### Denial of service
 Audits are cheap to send but force the holder to read+hash whole objects
-(asymmetric, spammable). Pushed junk under the free quota fills disks until the
-lease GC reclaims it. Neither is rate-limited yet.
+(asymmetric, spammable). A friend can fill the quota you give it with junk. Only
+friends can connect, so both are bounded by whom you add; neither is rate-limited yet.
+
+### Owner machine compromised
+Malware on an owner's machine (with the keyring unlocked) can publish garbage over its
+backups. Hosts keep replaced data in trash for `hosting.trash_days` before deleting it,
+and the owner can't empty a friend's trash remotely, so the old data survives long
+enough to notice. Recovering from trash is not automated yet.
 
 ## Assumptions
 
 - The user keeps the **24-word recovery phrase** safe and secret; anyone with it
   has full control, and losing it (and the keyring) makes data unrecoverable.
-- At least one honest **bootstrap peer** is reachable for discovery/recovery.
+- At least one honest **friend** is reachable for recovery, and its contact card is
+  kept with the recovery phrase.
 - The local machine running the client is not compromised while the keyring is
   unlocked.
 - Clocks are roughly synchronized (head-pointer newest-wins, storage leases).
@@ -133,15 +114,11 @@ lease GC reclaims it. Neither is rate-limited yet.
 
 - **Network-level anonymity** — peers' IP addresses are visible to peers they
   connect to.
-- **A paid storage market** — nodes can be *discovered* (`publish --open` via the
-  rendezvous tag) and ranked by reputation, but there is no pricing/payment/
-  contract layer.
-- **Costly identities / global consensus reputation** — kept local and
-  Sybil-isolated instead.
+- **Backing up to strangers / a paid storage market** — there is no discovery of
+  untrusted storage nodes and no pricing/payment/contract layer.
+- **Costly identities / reputation systems** — unnecessary between friends.
 
 ## One-line summary
 
-> Confidentiality and integrity are strong and cryptographic. Availability and the
-> storage economy are **best-effort on the open network** and **robust only in the
-> friend-to-friend (trusted-peer) regime** — use trusted peers for anything you
-> can't afford to lose.
+> Confidentiality and integrity are strong and cryptographic. Availability rests on
+> the friends you publish to; audits tell you when one of them stops holding your data.

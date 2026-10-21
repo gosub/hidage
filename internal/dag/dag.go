@@ -36,18 +36,20 @@ const (
 
 // FileNode lists the ordered chunks that compose a file.
 type FileNode struct {
-	Type   string `json:"type"` // always "file"
-	Mode   uint32 `json:"mode"`
-	Size   int64  `json:"size"`
-	Chunks []Ref  `json:"chunks"`
+	Type    string `json:"type"` // always "file"
+	Mode    uint32 `json:"mode"`
+	Size    int64  `json:"size"`
+	ModTime int64  `json:"modTime,omitempty"` // unix nanoseconds; 0 if unknown (pre-mtime nodes)
+	Chunks  []Ref  `json:"chunks"`
 }
 
 // Entry is one child of a directory.
 type Entry struct {
-	Name string `json:"name"`
-	Kind string `json:"kind"` // KindFile | KindTree
-	Mode uint32 `json:"mode"`
-	Ref  Ref    `json:"ref"`
+	Name    string `json:"name"`
+	Kind    string `json:"kind"` // KindFile | KindTree
+	Mode    uint32 `json:"mode"`
+	ModTime int64  `json:"modTime,omitempty"` // unix nanoseconds; 0 if unknown
+	Ref     Ref    `json:"ref"`
 }
 
 // TreeNode is a directory: a name-sorted list of entries.

@@ -2,7 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -10,140 +11,83 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/spf13/cobra"
+	"github.com/multiformats/go-multiaddr"
 
 	"hidage/internal/account"
-	"hidage/internal/accounting"
 	"hidage/internal/config"
 	"hidage/internal/dag"
+	"hidage/internal/friends"
+	"hidage/internal/hosting"
+	"hidage/internal/keyring"
 	"hidage/internal/netstore"
 	"hidage/internal/p2p"
 	"hidage/internal/pack"
 	"hidage/internal/repo"
-	"hidage/internal/reputation"
 	"hidage/internal/store"
-	"hidage/internal/trust"
 )
 
-// acceptablePeer reports whether to push to a peer: never if blocked, always if
-// explicitly trusted, otherwise unless its audit reputation is known-bad.
-func acceptablePeer(policy *trust.Policy, rep *reputation.Store, pubHex string) bool {
-	raw, err := hex.DecodeString(pubHex)
-	if err != nil || len(raw) != ed25519.PublicKeySize {
-		return false
-	}
-	switch policy.Verdict(ed25519.PublicKey(raw)) {
-	case trust.Blocked:
-		return false
-	case trust.Trusted:
-		return true
-	default:
-		return !rep.Bad(pubHex)
-	}
+// hostedStore is where this node keeps its friends' data.
+func hostedStore() (*hosting.Host, error) {
+	return hosting.Open(filepath.Join(config.DataStoreDir(), "hosted"))
 }
 
-// publishedStore is the node-wide store of objects this node serves to the network.
-func publishedStore() (*store.KeyedStore, error) {
-	return store.NewKeyedStore(filepath.Join(config.DataStoreDir(), "published"))
+// headsStore holds the signed head records friends handed this node, keyed by
+// owner public-key hex, so an owner can get its head back after losing its machine.
+func headsStore() (*store.KeyedStore, error) {
+	return store.NewKeyedStore(filepath.Join(config.DataStoreDir(), "heads"))
 }
 
-func newServeCmd() *cobra.Command {
-	var listen string
-	var bootstrap []string
-	var ratio float64
-	var freeMiB int64
-	var leaseHours int
-	var advertise bool
-	cmd := &cobra.Command{
-		Use:   "serve",
-		Short: "Run a node: serve objects, accept pushes from trusted peers, join the DHT",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			kr, err := unlock()
-			if err != nil {
-				return err
-			}
-			paths, err := config.Ensure()
-			if err != nil {
-				return err
-			}
-			pub, err := publishedStore()
-			if err != nil {
-				return err
-			}
-			node, err := p2p.New(kr.Identity(), pub, listen)
-			if err != nil {
-				return err
-			}
-			defer node.Close()
-
-			ctx := context.Background()
-			if err := node.EnableDHT(ctx); err != nil {
-				return err
-			}
-			policy, err := trust.Load(paths.TrustPath)
-			if err != nil {
-				return err
-			}
-			ledger, err := accounting.Load(paths.AccountingPath)
-			if err != nil {
-				return err
-			}
-			rep, err := reputation.Load(paths.ReputationPath)
-			if err != nil {
-				return err
-			}
-			node.EnableReputationService(rep.Evidence) // answer peers' transitive-trust queries
-			free := freeMiB << 20
-			node.EnablePush(pub,
-				func(senderPub []byte) bool {
-					if policy.Verdict(ed25519.PublicKey(senderPub)) == trust.Blocked {
-						return false
-					}
-					return ledger.Allow(hex.EncodeToString(senderPub), 0, ratio, free)
-				},
-				func(senderPub []byte, b int64) {
-					ledger.AddStoredForThem(hex.EncodeToString(senderPub), b)
-				})
-			if err := node.Bootstrap(ctx, bootstrap); err != nil {
-				return err
-			}
-			go reprovide(ctx, node, pub)
-			go gcLoop(ctx, pub, time.Duration(leaseHours)*time.Hour)
-			if advertise {
-				go advertiseLoop(ctx, node)
-			}
-
-			fmt.Println("hidage node listening; addresses:")
-			for _, a := range node.Addrs() {
-				fmt.Printf("  %s\n", a)
-			}
-			fmt.Println("Ctrl-C to stop.")
-			waitForSignal()
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&listen, "listen", "", "listen multiaddr (default: ephemeral TCP on all interfaces)")
-	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
-	cmd.Flags().Float64Var(&ratio, "ratio", accounting.DefaultRatio, "max bytes stored per peer per byte they store for us")
-	cmd.Flags().Int64Var(&freeMiB, "free", accounting.DefaultFreeQuota>>20, "free quota per peer, in MiB (no reciprocation required)")
-	cmd.Flags().IntVar(&leaseHours, "lease", 168, "hosted-shard lease in hours; data not renewed (re-published) within this is reclaimed")
-	cmd.Flags().BoolVar(&advertise, "advertise", true, "announce on the DHT that this node offers storage (discoverable by `publish --open`)")
-	return cmd
-}
-
-// advertiseLoop periodically announces this node as a storage provider; provider
-// records expire, so they must be refreshed.
-func advertiseLoop(ctx context.Context, node *p2p.Node) {
+// nodeStateLoop keeps node.json in step with the node's addresses, which change
+// as relay reservations, port mappings and observed addresses come and go.
+func nodeStateLoop(ctx context.Context, node *p2p.Node, locked bool) {
+	last := strings.Join(node.ListenAddrs(), " ")
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
 	for {
-		node.WaitForPeers(ctx, 1, time.Minute) // can't advertise into an empty routing table
-		c, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		_ = node.AdvertiseStorage(c)
-		cancel()
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			addrs := node.ListenAddrs()
+			if cur := strings.Join(addrs, " "); cur != last {
+				last = cur
+				_ = writeNodeState(addrs, locked)
+			}
+		}
+	}
+}
+
+// keepInTouchLoop periodically reconnects to friends (so they can relay for us
+// and we for them), refreshes their signed address records, and presents any
+// invite we accepted while the inviter was unreachable.
+func keepInTouchLoop(ctx context.Context, node *p2p.Node, book *friends.Book) {
+	for i := 0; ; i++ {
+		book.Refresh()
+		completePairings(ctx, node, book)
+		if i%10 == 0 {
+			reachFriends(ctx, node, book, true)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(30 * time.Second): // reach friends every 5 minutes, pair sooner
+		}
+	}
+}
+
+// reapLoop periodically drops friends' sets not renewed within the lease and
+// deletes trash older than the grace period.
+func reapLoop(ctx context.Context, h *hosting.Host, lease, trashAge time.Duration) {
+	for {
+		if st, err := h.Reap(lease, trashAge); err == nil && st.ExpiredSets+st.DeletedTrash > 0 {
+			fmt.Printf("[hosting] %d expired backup set(s); deleted %d old trashed object(s) (%s)\n",
+				st.ExpiredSets, st.DeletedTrash, config.FormatSize(st.FreedBytes))
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -152,369 +96,37 @@ func advertiseLoop(ctx context.Context, node *p2p.Node) {
 	}
 }
 
-// gcLoop periodically reclaims hosted objects whose storage lease has lapsed
-// (they were not renewed by a re-publish within the lease window).
-func gcLoop(ctx context.Context, blobs *store.KeyedStore, lease time.Duration) {
-	reap := func() {
-		if n, err := blobs.Reap(lease); err == nil && n > 0 {
-			fmt.Printf("[gc] reclaimed %d expired hosted objects\n", n)
-		}
-	}
-	reap()
-	interval := lease / 12
-	if interval < time.Minute {
-		interval = time.Minute
-	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			reap()
-		}
-	}
-}
-
-func newPublishCmd() *cobra.Command {
-	var bootstrap, peers []string
-	var redundancy float64
-	var useTrusted bool
-	var useOpen bool
-	var openPeers int
-	var minPeers int
-	var transitive bool
-	cmd := &cobra.Command{
-		Use:   "publish",
-		Short: "Erasure-code the latest snapshot, spread shards across peers, publish the head",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			kr, err := unlock()
-			if err != nil {
-				return err
-			}
-			folder := repo.Find(startDir())
-			if folder == "" {
-				return fmt.Errorf("not inside a hidage repository")
-			}
-			r, err := repo.Open(folder, kr.MasterKey(), config.DataStoreDir())
-			if err != nil {
-				return err
-			}
-			snap, err := r.Latest()
-			if err != nil {
-				return err
-			}
-			if snap == nil {
-				return fmt.Errorf("no snapshots to publish")
-			}
-			objs, err := r.PublishSet(snap)
-			if err != nil {
-				return err
-			}
-
-			// Erasure-code the snapshot's objects into shards; the Release
-			// descriptor (pushed to every peer) records how to reassemble them.
-			rel, shardBlobs, err := pack.Build(objs, redundancy, snap.ID)
-			if err != nil {
-				return err
-			}
-			relBytes, err := json.Marshal(rel)
-			if err != nil {
-				return err
-			}
-			relID := store.ID(relBytes)
-
-			node, err := p2p.New(kr.Identity(), nil, "")
-			if err != nil {
-				return err
-			}
-			defer node.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
-			if err := node.EnableDHT(ctx); err != nil {
-				return err
-			}
-			if err := node.Bootstrap(ctx, bootstrap); err != nil {
-				return err
-			}
-			node.WaitForPeers(ctx, 1, 15*time.Second) // settle the DHT before record ops
-
-			// Merge this repo's release into the owner's account manifest, so the
-			// single head pointer indexes every backed-up folder, not just this one.
-			manifest := fetchManifest(ctx, node, kr.Identity().Public)
-			manifest.Upsert(account.Entry{
-				RepoID:    r.RepoID(),
-				Name:      snap.Source,
-				ReleaseID: relID,
-				UpdatedAt: time.Now().UTC(),
-			})
-			manifestBytes, err := manifest.Bytes()
-			if err != nil {
-				return err
-			}
-			manifestID := store.ID(manifestBytes)
-			paths, err := config.Ensure()
-			if err != nil {
-				return err
-			}
-			policy, err := trust.Load(paths.TrustPath)
-			if err != nil {
-				return err
-			}
-			rep, err := reputation.Load(paths.ReputationPath)
-			if err != nil {
-				return err
-			}
-			ledger, err := accounting.Load(paths.AccountingPath)
-			if err != nil {
-				return err
-			}
-
-			if len(peers) == 0 && !useTrusted && !useOpen {
-				return fmt.Errorf("specify where to publish: --peer <addr>, --trusted, and/or --open")
-			}
-
-			// Collect candidate peers: explicit --peer multiaddrs, plus (with
-			// --trusted) every trusted key located online via the DHT.
-			seen := map[peer.ID]bool{}
-			var accepted []peerID
-			add := func(pid peer.ID) {
-				if seen[pid] || pid == node.ID() {
-					return
-				}
-				seen[pid] = true
-				pubHex, _ := p2p.PeerPubKeyHex(pid)
-				if pubHex != "" && !acceptablePeer(policy, rep, pubHex) {
-					fmt.Printf("  %s: skipped (blocked or low reputation)\n", pid)
-					return
-				}
-				accepted = append(accepted, peerID{id: pid, pubHex: pubHex})
-			}
-			for _, addr := range peers {
-				pid, err := node.Connect(ctx, addr)
-				if err != nil {
-					fmt.Printf("  %s: %v\n", addr, err)
-					continue
-				}
-				add(pid)
-			}
-			if useTrusted {
-				trusted, _ := policy.List()
-				for _, pubHex := range trusted {
-					pid, err := p2p.PeerIDFromPubKeyHex(pubHex)
-					if err != nil {
-						continue
-					}
-					if err := node.DialPeerID(ctx, pid); err != nil {
-						fmt.Printf("  %s: trusted peer unreachable (%v)\n", pid, err)
-						continue
-					}
-					add(pid)
-				}
-			}
-			if useOpen {
-				// Discover storage nodes via the rendezvous tag, drop blocked/known-bad
-				// ones, rank the rest, and take the top N.
-				providers, _ := node.FindStorageProviders(ctx)
-
-				// With --transitive, consult depth-1 anchors (trusted + Good peers,
-				// each weighted by my own rating) to rank strangers I haven't audited.
-				var anchors []anchorConn
-				if transitive {
-					anchors = buildAnchors(ctx, node, policy, rep)
-					fmt.Printf("transitive ranking: consulting %d anchor(s)\n", len(anchors))
-				}
-				rankScore := func(pubHex string) float64 {
-					myScore, mySamples := rep.Evidence(pubHex)
-					if mySamples >= reputation.MinSamples {
-						return myScore // I have enough first-hand evidence
-					}
-					if len(anchors) > 0 {
-						var ops []weightedOpinion
-						for _, a := range anchors {
-							sc, sm, err := node.AskReputation(ctx, a.pid, pubHex)
-							if err == nil {
-								ops = append(ops, weightedOpinion{weight: a.weight, score: sc, samples: sm})
-							}
-						}
-						if v, ok := aggregateTransitive(ops, reputation.MinSamples); ok {
-							return v
-						}
-					}
-					return 0.5 // unproven, no anchor opinion
-				}
-
-				type cand struct {
-					ai    peer.AddrInfo
-					score float64
-				}
-				var cands []cand
-				for _, ai := range providers {
-					if ai.ID == node.ID() || seen[ai.ID] {
-						continue
-					}
-					pubHex, err := p2p.PeerPubKeyHex(ai.ID)
-					if err != nil || !acceptablePeer(policy, rep, pubHex) {
-						continue
-					}
-					cands = append(cands, cand{ai, rankScore(pubHex)})
-				}
-				sort.Slice(cands, func(i, j int) bool { return cands[i].score > cands[j].score })
-				picked := 0
-				for _, c := range cands {
-					if picked >= openPeers {
-						break
-					}
-					if err := node.ConnectInfo(ctx, c.ai); err != nil {
-						continue
-					}
-					add(c.ai.ID)
-					picked++
-				}
-				fmt.Printf("Discovered %d storage node(s) via --open; using %d.\n", len(cands), picked)
-			}
-			if len(accepted) == 0 {
-				return fmt.Errorf("no acceptable peers reachable to publish to")
-			}
-			if len(accepted) < minPeers {
-				return fmt.Errorf("only %d acceptable peer(s) reachable, need at least --min-peers=%d", len(accepted), minPeers)
-			}
-			// Erasure coding only helps if shards land on enough distinct peers.
-			tolerate := int(float64(len(accepted)) * (1 - 1/redundancy))
-			if tolerate == 0 {
-				fmt.Printf("WARNING: %d peer(s) at %.1fx redundancy gives no fault tolerance "+
-					"(losing one peer loses the backup); use more peers or higher --redundancy.\n",
-					len(accepted), redundancy)
-			} else {
-				fmt.Printf("Spreading across %d peers; tolerates losing up to %d.\n", len(accepted), tolerate)
-			}
-
-			common := map[string][]byte{relID: relBytes, manifestID: manifestBytes}
-			assignments := spreadShards(shardBlobs, common, len(accepted))
-			dist := distribution{ReleaseID: relID, Redundancy: redundancy, Peers: map[string][]string{}}
-			for i, p := range accepted {
-				push := assignments[i]
-				var bytes int64
-				var shardIDs []string
-				for id, d := range push {
-					bytes += int64(len(d))
-					if _, isShard := shardBlobs[id]; isShard {
-						shardIDs = append(shardIDs, id)
-					}
-				}
-				stored, err := node.PushObjects(ctx, p.id, push)
-				if err != nil {
-					fmt.Printf("  %s: %v\n", p.id, err)
-					continue
-				}
-				if stored == len(push) && p.pubHex != "" {
-					ledger.AddTheyStoreForUs(p.pubHex, bytes)
-					dist.Peers[p.pubHex] = shardIDs // remember what to audit them for
-				}
-				fmt.Printf("  %s: stored %d shards (%d bytes)\n", p.id, stored, bytes)
-			}
-			if err := writeDistribution(r.HidageFile("distribution.json"), dist); err != nil {
-				return err
-			}
-			if err := node.PutHead(ctx, kr.Identity(), manifestID); err != nil {
-				return fmt.Errorf("publish head: %w", err)
-			}
-			fmt.Printf("Published %q (%s) as %d shards across %d peers (%.1fx redundancy).\n",
-				snap.Source, r.RepoID()[:12], len(shardBlobs), len(accepted), redundancy)
-			fmt.Printf("Account now indexes %d backup(s).\n", len(manifest.Entries))
-			return nil
-		},
-	}
-	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
-	cmd.Flags().StringArrayVar(&peers, "peer", nil, "storage peer multiaddr(s) to push to")
-	cmd.Flags().BoolVar(&useTrusted, "trusted", false, "also push to every trusted peer found online (see `hidage trust`)")
-	cmd.Flags().BoolVar(&useOpen, "open", false, "also discover untrusted storage nodes on the network (best-effort; ranked by reputation)")
-	cmd.Flags().IntVar(&openPeers, "open-peers", 5, "with --open, how many discovered nodes to use")
-	cmd.Flags().BoolVar(&transitive, "transitive", false, "rank --open strangers using depth-1 opinions from trusted + reputable peers")
-	cmd.Flags().IntVar(&minPeers, "min-peers", 1, "fail unless at least this many acceptable peers are reachable")
-	cmd.Flags().Float64Var(&redundancy, "redundancy", 2.0, "shards to emit per shard needed (e.g. 2.0 tolerates losing half)")
-	return cmd
-}
-
 type peerID struct {
 	id     peer.ID
 	pubHex string
 }
 
-// anchorConn is a reachable depth-1 trust anchor and my weight for its opinions.
-type anchorConn struct {
-	pid    peer.ID
-	weight float64
+// peerName is a friend's nickname, or a short peer ID for others.
+func peerName(book *friends.Book, p peerID) string {
+	if f, ok := book.Get(p.pubHex); ok {
+		return f.Nickname
+	}
+	return p.id.String()[:16]
 }
 
-// weightedOpinion is one anchor's reported opinion of a candidate, with my
-// weight for that anchor and the evidence behind the anchor's opinion.
-type weightedOpinion struct {
-	weight  float64
-	score   float64
-	samples float64
-}
-
-// aggregateTransitive combines anchor opinions into a single score: a weighted
-// average over anchors that have enough evidence (each anchor's opinion is
-// discounted by my weight for that anchor). Returns false if no anchor has a
-// well-founded opinion. Pure function — unit-tested.
-func aggregateTransitive(ops []weightedOpinion, minSamples float64) (float64, bool) {
-	var num, den float64
-	for _, o := range ops {
-		if o.samples < minSamples {
-			continue // the anchor itself hasn't audited this peer enough to count
-		}
-		num += o.weight * o.score
-		den += o.weight
-	}
-	if den == 0 {
-		return 0, false
-	}
-	return num / den, true
-}
-
-// buildAnchors resolves and connects to depth-1 trust anchors: every trusted key
-// (weight 1.0) and every peer whose own reputation is Good (weight = my score for
-// it). Only reachable anchors are returned.
-func buildAnchors(ctx context.Context, node *p2p.Node, policy *trust.Policy, rep *reputation.Store) []anchorConn {
-	anchorsHex := map[string]bool{}
-	trusted, _ := policy.List()
-	for _, h := range trusted {
-		anchorsHex[h] = true
-	}
-	for _, e := range rep.List() {
-		if e.Good {
-			anchorsHex[e.PubKey] = true
-		}
-	}
-	var out []anchorConn
-	for h := range anchorsHex {
-		pid, err := p2p.PeerIDFromPubKeyHex(h)
-		if err != nil || pid == node.ID() {
-			continue
-		}
-		if err := node.DialPeerID(ctx, pid); err != nil {
-			continue // anchor offline
-		}
-		weight := 1.0 // trusted anchors carry full weight
-		if raw, err := hex.DecodeString(h); err == nil && len(raw) == ed25519.PublicKeySize &&
-			policy.Verdict(ed25519.PublicKey(raw)) != trust.Trusted {
-			weight = rep.Score(h) // a Good (not explicitly trusted) anchor: discount by my rating
-		}
-		out = append(out, anchorConn{pid: pid, weight: weight})
-	}
-	return out
+// hostedSetID names a repository's set on friends' nodes. It is derived from the
+// repo id under the master key, so hosts can't link it to the repo.
+func hostedSetID(masterKey []byte, repoID string) string {
+	m := hmac.New(sha256.New, masterKey)
+	m.Write([]byte("hidage/hosted-set/v1\n" + repoID))
+	return hex.EncodeToString(m.Sum(nil))[:32]
 }
 
 // distribution records which shards of the latest release went to which peer, so
 // audit can later challenge each peer for exactly the shards it agreed to hold.
+// SnapshotID names the published snapshot so `status` can detect a repository
+// whose latest snapshot has not been re-published.
 type distribution struct {
-	ReleaseID  string              `json:"releaseID"`
-	Redundancy float64             `json:"redundancy"`
-	Peers      map[string][]string `json:"peers"` // peer pubkey hex -> shard ids
+	ReleaseID   string              `json:"releaseID"`
+	SnapshotID  string              `json:"snapshotID"`
+	Redundancy  float64             `json:"redundancy"`
+	PublishedAt time.Time           `json:"publishedAt"`
+	Peers       map[string][]string `json:"peers"` // peer pubkey hex -> shard ids
 }
 
 func writeDistribution(path string, d distribution) error {
@@ -534,33 +146,57 @@ func readDistribution(path string) (distribution, error) {
 	return d, json.Unmarshal(data, &d)
 }
 
-// spreadShards assigns shard blobs round-robin across n peers, and gives the
-// common objects (Release + account manifest) to every peer so they can always
-// be fetched.
-func spreadShards(shardBlobs, common map[string][]byte, n int) []map[string][]byte {
-	out := make([]map[string][]byte, n)
-	for i := range out {
-		out[i] = map[string][]byte{}
-		for id, data := range common {
-			out[i][id] = data
-		}
+// placeShards decides which peer (by hex key) holds which shard of a release:
+// for each pack, peers are ranked by a hash of (pack, peer) and shard i goes to
+// the i-th ranked peer, wrapping around. A pack's shards thus land on as many
+// distinct peers as possible, and the same release with the same peers always
+// lands the same way (rendezvous hashing: adding or losing a peer moves only
+// the shards it gains or held), so republishing doesn't shuffle data around.
+func placeShards(rel *pack.Release, peerKeys []string) [][]string {
+	out := make([][]string, len(peerKeys))
+	if len(peerKeys) == 0 {
+		return out
 	}
-	i := 0
-	for id, data := range shardBlobs {
-		out[i%n][id] = data
-		i++
+	for _, desc := range rel.Packs {
+		if len(desc.Shards) == 0 {
+			continue
+		}
+		packKey := desc.Shards[0].ID
+		order := make([]int, len(peerKeys))
+		score := make([]string, len(peerKeys))
+		for i, k := range peerKeys {
+			order[i] = i
+			sum := sha256.Sum256([]byte(packKey + "/" + k))
+			score[i] = hex.EncodeToString(sum[:])
+		}
+		sort.Slice(order, func(a, b int) bool { return score[order[a]] < score[order[b]] })
+		for i, ref := range desc.Shards {
+			p := order[i%len(order)]
+			out[p] = append(out[p], ref.ID)
+		}
 	}
 	return out
 }
 
-// fetchManifest resolves the owner's current account manifest from the network,
-// returning an empty one if none exists or it can't be verified.
-func fetchManifest(ctx context.Context, node *p2p.Node, owner ed25519.PublicKey) *account.Manifest {
-	mid, err := node.GetHead(ctx, owner)
-	if err != nil || mid == "" {
+// seenFriend reports whether pubHex is among the friends in list.
+func seenFriend(list []friends.Friend, pubHex string) bool {
+	for _, f := range list {
+		if f.PubKey == pubHex {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchManifest resolves this node's current account manifest from its friends
+// (newest signed head wins), returning an empty one if none exists or it can't
+// be verified.
+func fetchManifest(ctx context.Context, node *p2p.Node, peers []peer.ID) *account.Manifest {
+	mid := node.ResolveHead(ctx, peers)
+	if mid == "" {
 		return account.New()
 	}
-	data, err := node.GetObject(ctx, mid)
+	data, err := node.GetObject(ctx, mid, peers)
 	if err != nil || store.ID(data) != mid {
 		return account.New()
 	}
@@ -571,116 +207,192 @@ func fetchManifest(ctx context.Context, node *p2p.Node, owner ed25519.PublicKey)
 	return m
 }
 
-func newNetRestoreCmd() *cobra.Command {
-	var bootstrap []string
-	var ownerHex string
-	var repoSel string
-	var all bool
-	cmd := &cobra.Command{
-		Use:   "net-restore <out-dir>",
-		Short: "Recover backups from the network (head → account manifest → shards)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			kr, err := unlock()
-			if err != nil {
-				return err
-			}
-			owner := kr.Identity().Public
-			if ownerHex != "" {
-				raw, err := hex.DecodeString(ownerHex)
-				if err != nil || len(raw) != ed25519.PublicKeySize {
-					return fmt.Errorf("invalid --owner public key")
-				}
-				owner = ed25519.PublicKey(raw)
-			}
-
-			node, err := p2p.New(kr.Identity(), nil, "")
-			if err != nil {
-				return err
-			}
-			defer node.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-			defer cancel()
-			if err := node.EnableDHT(ctx); err != nil {
-				return err
-			}
-			if err := node.Bootstrap(ctx, bootstrap); err != nil {
-				return err
-			}
-
-			var mid string
-			deadline := time.Now().Add(60 * time.Second)
-			for time.Now().Before(deadline) {
-				if mid, _ = node.GetHead(ctx, owner); mid != "" {
-					break
-				}
-				time.Sleep(time.Second)
-			}
-			if mid == "" {
-				return fmt.Errorf("could not resolve a head pointer for that owner")
-			}
-
-			cache, err := store.NewKeyedStore(filepath.Join(config.DataStoreDir(), "cache"))
-			if err != nil {
-				return err
-			}
-			ns := netstore.New(node, cache)
-
-			manBytes, err := ns.Get(mid)
-			if err != nil {
-				return fmt.Errorf("fetch account manifest: %w", err)
-			}
-			if store.ID(manBytes) != mid {
-				return fmt.Errorf("account manifest failed integrity check")
-			}
-			manifest, err := account.Parse(manBytes)
-			if err != nil {
-				return err
-			}
-			if len(manifest.Entries) == 0 {
-				return fmt.Errorf("owner has no published backups")
-			}
-
-			// Choose which backup(s) to restore.
-			var targets []account.Entry
-			switch {
-			case all:
-				targets = manifest.Entries
-			case repoSel != "":
-				e, err := manifest.Find(repoSel)
-				if err != nil {
-					return err
-				}
-				targets = []account.Entry{*e}
-			case len(manifest.Entries) == 1:
-				targets = manifest.Entries
-			default:
-				fmt.Println("Multiple backups found; pick one with --repo <name> or use --all:")
-				for _, e := range manifest.Entries {
-					fmt.Printf("  %-24s  %s\n", e.Name, e.RepoID[:12])
-				}
-				return fmt.Errorf("specify --repo or --all")
-			}
-
-			for _, e := range targets {
-				if err := restoreRelease(ns, cache, kr.MasterKey(), e.ReleaseID, args[0]); err != nil {
-					return fmt.Errorf("restore %q: %w", e.Name, err)
-				}
-				fmt.Printf("Recovered %q into %s\n", e.Name, args[0])
-			}
-			return nil
-		},
+// restoreFromFriends recovers the latest published version of your backups
+// from your friends (plus the --from peers) into outDir: the head names the
+// account manifest, whose roster may add friends this machine doesn't know;
+// each release is rebuilt from K-of-M shards and, unless filesOnly, the restored
+// folder becomes its repository again.
+func restoreFromFriends(kr *keyring.Keyring, outDir string, from []string, repoSel string, all, filesOnly bool) error {
+	node, err := p2p.New(kr.Identity(), nil, nil)
+	if err != nil {
+		return err
 	}
-	cmd.Flags().StringArrayVar(&bootstrap, "bootstrap", nil, "bootstrap peer multiaddr(s)")
-	cmd.Flags().StringVar(&ownerHex, "owner", "", "owner public key hex (default: your own)")
-	cmd.Flags().StringVar(&repoSel, "repo", "", "which backup to restore (name or repo-id prefix)")
-	cmd.Flags().BoolVar(&all, "all", false, "restore every backup in the account")
-	return cmd
+	defer node.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	sources, err := recoverySources(ctx, node, from)
+	if err != nil {
+		return err
+	}
+	manifest, err := resolveManifest(ctx, node, sources)
+	if err != nil {
+		return err
+	}
+	// The manifest's roster names friends this machine may not know yet
+	// (it may be brand new): add them and ask them too, in case one holds
+	// a newer head or shards the others lack.
+	if added := importRoster(manifest, kr.MasterKey()); added > 0 {
+		fmt.Printf("Restored %d friend(s) from your backup's friend list.\n", added)
+		book, err := loadFriends()
+		if err != nil {
+			return err
+		}
+		more := peerIDs(reachFriends(ctx, node, book, false))
+		sources = mergePeers(sources, more)
+		if m, err := resolveManifest(ctx, node, sources); err == nil {
+			manifest = m
+		}
+	}
+
+	cache, err := store.NewKeyedStore(filepath.Join(config.DataStoreDir(), "cache"))
+	if err != nil {
+		return err
+	}
+	ns := netstore.New(node, cache, sources)
+	if len(manifest.Entries) == 0 {
+		return fmt.Errorf("you have no published backups")
+	}
+
+	// Choose which backup(s) to restore.
+	var targets []account.Entry
+	switch {
+	case all:
+		targets = manifest.Entries
+	case repoSel != "":
+		e, err := manifest.Find(repoSel)
+		if err != nil {
+			return err
+		}
+		targets = []account.Entry{*e}
+	case len(manifest.Entries) == 1:
+		targets = manifest.Entries
+	default:
+		fmt.Println("Multiple backups found; pick one with --repo <name> or use --all:")
+		for _, e := range manifest.Entries {
+			fmt.Printf("  %-24s  %s\n", e.Name, e.RepoID[:12])
+		}
+		return fmt.Errorf("specify --repo or --all")
+	}
+
+	for _, e := range targets {
+		folder, err := restoreRelease(ns, cache, kr.MasterKey(), e, outDir, !filesOnly)
+		if err != nil {
+			return fmt.Errorf("restore %q: %w", e.Name, err)
+		}
+		fmt.Printf("Recovered %q into %s\n", e.Name, folder)
+	}
+	if !filesOnly {
+		fmt.Println("The restored folders are hidage repositories again: run `hidage backup <folder>`")
+		fmt.Println("in each to resume (it only renews what your friends already hold).")
+	}
+	return nil
+}
+
+// listFromFriends prints the backups your account manifest indexes.
+func listFromFriends(kr *keyring.Keyring, from []string) error {
+	node, err := p2p.New(kr.Identity(), nil, nil)
+	if err != nil {
+		return err
+	}
+	defer node.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	sources, err := recoverySources(ctx, node, from)
+	if err != nil {
+		return err
+	}
+	manifest, err := resolveManifest(ctx, node, sources)
+	if err != nil {
+		return err
+	}
+	if len(manifest.Entries) == 0 {
+		fmt.Println("(no backups published to your friends)")
+		return nil
+	}
+	fmt.Printf("%-24s  %-12s  %-8s  %s\n", "NAME", "REPO-ID", "VERSIONS", "PUBLISHED")
+	for _, e := range manifest.Entries {
+		fmt.Printf("%-24s  %-12s  %-8d  %s\n", e.Name, e.RepoID[:12], 1+len(e.History), e.UpdatedAt.Local().Format("2006-01-02 15:04:05"))
+	}
+	return nil
+}
+
+// recoverySources reaches every friend in the friend list plus the extra peers
+// given with --from, and returns them all. It fails if none can be reached.
+func recoverySources(ctx context.Context, node *p2p.Node, from []string) ([]peer.ID, error) {
+	extra, err := connectExtra(ctx, node, from)
+	if err != nil {
+		return nil, err
+	}
+	book, err := loadFriends()
+	if err != nil {
+		return nil, err
+	}
+	sources := append(peerIDs(reachFriends(ctx, node, book, true)), extra...)
+	if len(sources) == 0 {
+		if len(book.List()) == 0 {
+			return nil, fmt.Errorf("no friends to recover from; on a new machine pass --from <a friend's contact card or address>")
+		}
+		return nil, fmt.Errorf("none of your friends is reachable right now")
+	}
+	return sources, nil
 }
 
 // restoreRelease fetches a Release, reassembles its objects from K-of-M shards,
-// and restores the snapshot into outDir (under its source name).
-func restoreRelease(ns *netstore.Store, cache *store.KeyedStore, masterKey []byte, relID, outDir string) error {
+// and restores the snapshot into outDir (under its source name), returning the
+// restored folder. With adopt, the folder becomes the original repository again
+// (same repo id, snapshot and objects), unless it already is one.
+func restoreRelease(ns *netstore.Store, cache *store.KeyedStore, masterKey []byte, e account.Entry, outDir string, adopt bool) (string, error) {
+	relBytes, err := ns.Get(e.ReleaseID)
+	if err != nil {
+		return "", fmt.Errorf("fetch release: %w", err)
+	}
+	if store.ID(relBytes) != e.ReleaseID {
+		return "", fmt.Errorf("release failed integrity check")
+	}
+	var rel pack.Release
+	if err := json.Unmarshal(relBytes, &rel); err != nil {
+		return "", err
+	}
+	objects, err := pack.Reassemble(&rel, ns.Get)
+	if err != nil {
+		return "", fmt.Errorf("reassemble: %w", err)
+	}
+	for id, data := range objects {
+		if err := cache.Put(id, data); err != nil {
+			return "", err
+		}
+	}
+	snap, err := repo.ParseSnapshot(objects[rel.SnapshotID])
+	if err != nil {
+		return "", err
+	}
+	l := dag.NewLoader(cache, cache, masterKey)
+	if err := repo.RestoreWith(l, snap, outDir); err != nil {
+		return "", err
+	}
+	name, err := repo.RootName(l, snap)
+	if err != nil {
+		return outDir, nil
+	}
+	folder := filepath.Join(outDir, name)
+	if adopt && !repo.Exists(folder) {
+		r, err := repo.Adopt(folder, masterKey, config.DataStoreDir(), e.RepoID, objects[rel.SnapshotID], cache.Get)
+		if err != nil {
+			return "", err
+		}
+		r.SaveRelease(rel.SnapshotID, relBytes)
+		// Bring back the older versions friends keep too, so history survives.
+		for _, id := range e.History {
+			if err := importVersion(ns, cache, r, id); err != nil {
+				fmt.Printf("  could not recover an older version of %q: %v\n", e.Name, err)
+			}
+		}
+	}
+	return folder, nil
+}
+
+// importVersion adds an older published version (by Release id) to r.
+func importVersion(ns *netstore.Store, cache *store.KeyedStore, r *repo.Repo, relID string) error {
 	relBytes, err := ns.Get(relID)
 	if err != nil {
 		return fmt.Errorf("fetch release: %w", err)
@@ -701,22 +413,79 @@ func restoreRelease(ns *netstore.Store, cache *store.KeyedStore, masterKey []byt
 			return err
 		}
 	}
-	snap, err := repo.ParseSnapshot(objects[rel.SnapshotID])
-	if err != nil {
+	if err := r.Import(objects[rel.SnapshotID], cache.Get); err != nil {
 		return err
 	}
-	return repo.RestoreWith(dag.NewLoader(cache, cache, masterKey), snap, outDir)
+	return r.SaveRelease(rel.SnapshotID, relBytes)
 }
 
-// reprovide announces every locally-held object to the DHT.
-func reprovide(ctx context.Context, node *p2p.Node, blobs *store.KeyedStore) {
-	ids, err := blobs.List()
+// resolveManifest fetches and verifies this node's newest account manifest from
+// sources.
+func resolveManifest(ctx context.Context, node *p2p.Node, sources []peer.ID) (*account.Manifest, error) {
+	mid := node.ResolveHead(ctx, sources)
+	if mid == "" {
+		return nil, fmt.Errorf("none of the %d friend(s) reached holds a backup of yours", len(sources))
+	}
+	data, err := node.GetObject(ctx, mid, sources)
 	if err != nil {
-		return
+		return nil, fmt.Errorf("fetch account manifest: %w", err)
 	}
-	for _, id := range ids {
-		_ = node.Provide(ctx, id)
+	if store.ID(data) != mid {
+		return nil, fmt.Errorf("account manifest failed integrity check")
 	}
+	return account.Parse(data)
+}
+
+// rosterOf lists the friends for the manifest's sealed roster.
+func rosterOf(book *friends.Book) []account.RosterEntry {
+	var out []account.RosterEntry
+	for _, f := range book.List() {
+		out = append(out, account.RosterEntry{PubKey: f.PubKey, Nickname: f.Nickname, Addrs: f.Addrs, Give: f.Give})
+	}
+	return out
+}
+
+// importRoster adds the manifest's roster friends that this machine doesn't
+// know yet, returning how many it added.
+func importRoster(m *account.Manifest, masterKey []byte) int {
+	roster, err := m.OpenRoster(masterKey)
+	if err != nil || len(roster) == 0 {
+		return 0
+	}
+	book, err := loadFriends()
+	if err != nil {
+		return 0
+	}
+	added := 0
+	for _, e := range roster {
+		if book.IsFriend(e.PubKey) {
+			continue
+		}
+		card := &friends.Card{PubKey: mustPub(e.PubKey), Nickname: e.Nickname}
+		for _, a := range e.Addrs {
+			if ma, err := multiaddr.NewMultiaddr(a); err == nil {
+				card.Addrs = append(card.Addrs, ma)
+			}
+		}
+		if _, isNew, err := book.Add(card, e.Nickname, e.Give); err == nil && isNew {
+			added++
+		}
+	}
+	return added
+}
+
+// mergePeers appends the peers in more that are not already in base.
+func mergePeers(base, more []peer.ID) []peer.ID {
+	seen := map[peer.ID]bool{}
+	for _, p := range base {
+		seen[p] = true
+	}
+	for _, p := range more {
+		if !seen[p] {
+			base, seen[p] = append(base, p), true
+		}
+	}
+	return base
 }
 
 func waitForSignal() {

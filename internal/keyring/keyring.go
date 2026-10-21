@@ -11,6 +11,7 @@ import (
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,11 +33,15 @@ const (
 )
 
 // wrapped is the on-disk form: Argon2id parameters plus the root sealed under the
-// passphrase KEK. The raw root is never written.
+// passphrase KEK. The raw root is never written. The identity public key is kept
+// in the clear so commands that only need to say who this node is (e.g. `hidage
+// id`) don't have to prompt for the passphrase; it is checked against the root on
+// every unlock.
 type wrapped struct {
 	Version     int                 `json:"version"`
 	Argon2      crypto.Argon2Params `json:"argon2"`
 	WrappedRoot []byte              `json:"wrappedRoot"`
+	PublicKey   []byte              `json:"publicKey,omitempty"`
 }
 
 // Keyring is an unlocked root secret with its derived keys.
@@ -105,7 +110,65 @@ func Load(path, passphrase string) (*Keyring, error) {
 	if err != nil {
 		return nil, errors.New("cannot unlock keyring (wrong passphrase?)")
 	}
-	return &Keyring{root: root}, nil
+	k := &Keyring{root: root}
+	pub := k.Identity().Public
+	switch {
+	case w.PublicKey == nil:
+		// Written before the public key was stored: record it now (best effort).
+		w.PublicKey = pub
+		if data, err := json.MarshalIndent(w, "", "  "); err == nil {
+			_ = os.WriteFile(path, data, 0o600)
+		}
+	case !ed25519.PublicKey(w.PublicKey).Equal(pub):
+		return nil, errors.New("keyring public key does not match its root secret (file corrupted?)")
+	}
+	return k, nil
+}
+
+// SaveIdentity caches the identity seed at path (0600). It lets a node host,
+// relay for and answer audits from friends without the passphrase; it cannot
+// decrypt backups (the master key is not derivable from it), but whoever reads
+// it can act as this node towards friends, so keep it like an SSH key.
+func (k *Keyring) SaveIdentity(path string) error {
+	seed := k.Identity().Private.Seed()
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(hex.EncodeToString(seed)+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// LoadIdentity reads an identity cached by SaveIdentity.
+func LoadIdentity(path string) (identity.Identity, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return identity.Identity{}, err
+	}
+	seed, err := hex.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil || len(seed) != ed25519.SeedSize {
+		return identity.Identity{}, errors.New("identity cache is corrupted")
+	}
+	return identity.FromSeed(seed), nil
+}
+
+// ErrNoPublicKey means the keyring predates the stored public key; unlocking it
+// once records the key.
+var ErrNoPublicKey = errors.New("keyring has no stored public key")
+
+// PublicKey returns the node's identity public key without unlocking the keyring.
+func PublicKey(path string) (ed25519.PublicKey, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read keyring: %w", err)
+	}
+	var w wrapped
+	if err := json.Unmarshal(raw, &w); err != nil {
+		return nil, fmt.Errorf("parse keyring: %w", err)
+	}
+	if len(w.PublicKey) != ed25519.PublicKeySize {
+		return nil, ErrNoPublicKey
+	}
+	return ed25519.PublicKey(w.PublicKey), nil
 }
 
 // Restore writes a new keyring from a BIP39 recovery mnemonic, wrapped under a
@@ -137,7 +200,8 @@ func persist(path string, root []byte, passphrase string) error {
 	if err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(wrapped{Version: 1, Argon2: argon, WrappedRoot: wr}, "", "  ")
+	pub := (&Keyring{root: root}).Identity().Public
+	data, err := json.MarshalIndent(wrapped{Version: 1, Argon2: argon, WrappedRoot: wr, PublicKey: pub}, "", "  ")
 	if err != nil {
 		return err
 	}

@@ -1,25 +1,24 @@
-// Package crypto handles client-side encryption for hidage. Plaintext is
-// sealed with ChaCha20-Poly1305 under a random per-backup data-encryption key
-// (DEK); the DEK is itself wrapped under a key-encryption key (KEK) derived
-// from the user's passphrase via Argon2id. Only the wrapped DEK and the
-// Argon2id parameters travel in the manifest, so hosts holding shards learn
-// nothing about the content.
+// Package crypto handles client-side key material for hidage. A key-encryption
+// key (KEK) is derived from the user's passphrase via Argon2id and used to wrap
+// (seal) the 32-byte root secret with ChaCha20-Poly1305; only the wrapped root
+// and the Argon2id parameters are written to the keyring, so a stolen keyring
+// file is useless without the passphrase.
+//
+// Repository objects (chunks and DAG nodes) are not sealed here: they use the
+// deterministic, content-addressed scheme in deterministic.go, which derives the
+// key and nonce from the plaintext under the user's master key so identical
+// content deduplicates. This file is the passphrase→root wrapping; seal.go seals
+// small private records under derived subkeys.
 package crypto
 
 import (
 	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"fmt"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
 )
-
-// DefaultChunkSize is the plaintext chunk size for the streaming AEAD. Each
-// chunk is sealed independently so memory stays bounded and corruption is
-// localized.
-const DefaultChunkSize = 64 * 1024
 
 // KeySize is the symmetric key length (ChaCha20-Poly1305 / Argon2 output).
 const KeySize = chacha20poly1305.KeySize
@@ -94,78 +93,4 @@ func UnwrapDEK(kek, wrapped []byte) ([]byte, error) {
 		return nil, errors.New("unwrap DEK failed (wrong passphrase?)")
 	}
 	return dek, nil
-}
-
-// chunkNonce builds the per-chunk nonce: 8-byte big-endian counter in the high
-// bytes, with the final byte set to 1 on the last chunk. The final-chunk flag
-// is what gives truncation protection: a stream missing its tail will not
-// present a chunk carrying the flag, so decryption fails.
-func chunkNonce(counter uint64, last bool) []byte {
-	nonce := make([]byte, chacha20poly1305.NonceSize)
-	binary.BigEndian.PutUint64(nonce[0:8], counter)
-	if last {
-		nonce[chacha20poly1305.NonceSize-1] = 1
-	}
-	return nonce
-}
-
-// Encrypt seals plaintext under dek as a sequence of AEAD chunks. Each non-final
-// chunk produces exactly chunkSize+Overhead ciphertext bytes; the final chunk
-// holds the remainder and is nonce-flagged.
-func Encrypt(dek, plaintext []byte, chunkSize int) ([]byte, error) {
-	if chunkSize <= 0 {
-		chunkSize = DefaultChunkSize
-	}
-	aead, err := chacha20poly1305.New(dek)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]byte, 0, len(plaintext)+aead.Overhead()*(len(plaintext)/chunkSize+1))
-	var counter uint64
-	for offset := 0; ; offset += chunkSize {
-		end := offset + chunkSize
-		last := end >= len(plaintext)
-		if last {
-			end = len(plaintext)
-		}
-		nonce := chunkNonce(counter, last)
-		out = aead.Seal(out, nonce, plaintext[offset:end], nil)
-		counter++
-		if last {
-			break
-		}
-	}
-	return out, nil
-}
-
-// Decrypt reverses Encrypt. It rejects a stream whose final chunk is missing or
-// whose chunks have been reordered, truncated, or corrupted.
-func Decrypt(dek, ciphertext []byte, chunkSize int) ([]byte, error) {
-	if chunkSize <= 0 {
-		chunkSize = DefaultChunkSize
-	}
-	aead, err := chacha20poly1305.New(dek)
-	if err != nil {
-		return nil, err
-	}
-	sealedChunk := chunkSize + aead.Overhead()
-	out := make([]byte, 0, len(ciphertext))
-	var counter uint64
-	for len(ciphertext) > 0 {
-		n := sealedChunk
-		last := false
-		if len(ciphertext) <= sealedChunk {
-			n = len(ciphertext)
-			last = true
-		}
-		nonce := chunkNonce(counter, last)
-		var openErr error
-		out, openErr = aead.Open(out, nonce, ciphertext[:n], nil)
-		if openErr != nil {
-			return nil, errors.New("decrypt failed (corrupt, truncated, or wrong key)")
-		}
-		ciphertext = ciphertext[n:]
-		counter++
-	}
-	return out, nil
 }

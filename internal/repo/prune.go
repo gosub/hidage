@@ -24,6 +24,7 @@ func (r *Repo) Forget(id string) error {
 	if err := os.Remove(r.snapshotPath(snap.ID)); err != nil {
 		return fmt.Errorf("remove snapshot %s: %w", snap.ID, err)
 	}
+	os.Remove(r.releasePath(snap.ID)) // its cached release, if published
 	return nil
 }
 

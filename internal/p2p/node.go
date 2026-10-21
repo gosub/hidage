@@ -1,9 +1,10 @@
-// Package p2p is hidage's networking layer: a libp2p host whose peer identity is
-// the node's Ed25519 key, a request/response protocol for fetching encrypted
-// objects (chunks, DAG nodes, snapshots) by content address, Kademlia DHT
-// discovery of who holds what, and a signed head pointer so a peer can find an
-// owner's latest snapshot. Objects on the wire are already encrypted/signed, so
-// serving them to untrusted peers reveals nothing.
+// Package p2p is hidage's networking layer between friends: a libp2p host whose
+// peer identity is the node's Ed25519 key, with request/response protocols to
+// push and fetch encrypted objects (chunks, DAG nodes, snapshots, shards) by
+// content address, prove storage (audits), hand over and return signed head
+// pointers, and exchange signed address records so friends whose addresses
+// change can still be found. There is no global discovery: a node talks to the
+// friends it knows. Objects on the wire are already encrypted/signed.
 package p2p
 
 import (
@@ -12,12 +13,14 @@ import (
 	"fmt"
 
 	"github.com/libp2p/go-libp2p"
-	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
+	manet "github.com/multiformats/go-multiaddr/net"
 
+	"hidage/internal/hosting"
 	"hidage/internal/identity"
 )
 
@@ -27,39 +30,69 @@ type Blobs interface {
 	Has(id string) (bool, error)
 }
 
-// Sink receives objects pushed by other peers (for storage on their behalf).
-type Sink interface {
-	Put(id string, data []byte) error
-}
-
 // Node is a running libp2p host.
 type Node struct {
-	host       host.Host
-	id         identity.Identity
-	blobs      Blobs
-	dht        *dht.IpfsDHT
-	sink       Sink
-	acceptPush func(senderPub []byte) bool
-	onStored   func(senderPub []byte, bytes int64)
-	repLookup  func(pubHex string) (score, samples float64)
+	host   host.Host
+	id     identity.Identity
+	blobs  Blobs
+	hosted *hosting.Host // friends' data (EnableHosting); serves each requester its own
+	friend func(peer.ID) bool
+}
+
+// isFriend reports whether p may use friends-only protocols.
+func (n *Node) isFriend(p peer.ID) bool { return n.friend == nil || n.friend(p) }
+
+// lookup returns the object a requester may read: from the requester's own
+// hosted data when hosting is enabled, else from the node's blob store.
+func (n *Node) lookup(requester peer.ID, id string) ([]byte, error) {
+	if n.hosted != nil {
+		owner, err := PeerPubKeyHex(requester)
+		if err != nil {
+			return nil, err
+		}
+		return n.hosted.Get(owner, id)
+	}
+	if n.blobs == nil {
+		return nil, ErrObjectNotFound
+	}
+	return n.blobs.Get(id)
 }
 
 // New starts a libp2p host whose peer ID is derived from id (the node's Ed25519
-// identity), listening on listen (a multiaddr; empty = an ephemeral TCP port on
-// all interfaces). It serves objects from blobs.
-func New(id identity.Identity, blobs Blobs, listen string) (*Node, error) {
+// identity), listening on listen (multiaddrs; empty = ephemeral TCP and QUIC
+// ports on all interfaces). It serves objects from blobs.
+//
+// Every node tries to be reachable across NATs: UPnP/NAT-PMP port mapping, the
+// circuit-relay transport (to dial friends through a relay) and DCUtR hole
+// punching (to upgrade relayed connections to direct ones). Options add the relay
+// service and relay reservations; see connectivity.go.
+func New(id identity.Identity, blobs Blobs, listen []string, opts ...Option) (*Node, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	priv, err := crypto.UnmarshalEd25519PrivateKey(id.Private)
 	if err != nil {
 		return nil, fmt.Errorf("convert identity key: %w", err)
 	}
-	if listen == "" {
-		listen = "/ip4/0.0.0.0/tcp/0"
+	if len(listen) == 0 {
+		listen = []string{"/ip4/0.0.0.0/tcp/0", "/ip4/0.0.0.0/udp/0/quic-v1"}
 	}
-	h, err := libp2p.New(libp2p.Identity(priv), libp2p.ListenAddrStrings(listen))
+	lopts := []libp2p.Option{
+		libp2p.Identity(priv),
+		libp2p.ListenAddrStrings(listen...),
+		libp2p.NATPortMap(),
+		libp2p.EnableHolePunching(),
+	}
+	if o.allowInbound != nil {
+		lopts = append(lopts, libp2p.ConnectionGater(inboundGater{allow: o.allowInbound}))
+	}
+	lopts = append(lopts, o.connectivity()...)
+	h, err := libp2p.New(lopts...)
 	if err != nil {
 		return nil, fmt.Errorf("start libp2p host: %w", err)
 	}
-	n := &Node{host: h, id: id, blobs: blobs}
+	n := &Node{host: h, id: id, blobs: blobs, friend: o.isFriend}
 	n.registerObjectHandler()
 	n.registerAuditHandler()
 	return n, nil
@@ -80,6 +113,71 @@ func (n *Node) Addrs() []string {
 		out = append(out, a.String())
 	}
 	return out
+}
+
+// ListenAddrs returns the node's addresses worth handing to a friend (without
+// the /p2p/<id> suffix): loopback and link-local addresses are dropped unless
+// nothing else is available.
+func (n *Node) ListenAddrs() []string {
+	return ShareableAddrs(n.host.Addrs())
+}
+
+// ShareableAddrs filters addrs down to those reachable from another machine,
+// falling back to all of them if none are.
+func ShareableAddrs(addrs []multiaddr.Multiaddr) []string {
+	var out, all []string
+	for _, a := range addrs {
+		all = append(all, a.String())
+		if !manet.IsIPLoopback(a) && !manet.IsIP6LinkLocal(a) {
+			out = append(out, a.String())
+		}
+	}
+	if len(out) == 0 {
+		return all
+	}
+	return out
+}
+
+// ResolveListenAddrs expands unspecified listen addresses (0.0.0.0, ::) over this
+// machine's interfaces, for describing a node that is not currently running.
+func ResolveListenAddrs(listen []string) []string {
+	ifaces, err := manet.InterfaceMultiaddrs()
+	if err != nil {
+		return nil
+	}
+	var resolved []multiaddr.Multiaddr
+	for _, l := range listen {
+		ma, err := multiaddr.NewMultiaddr(l)
+		if err != nil {
+			continue
+		}
+		rs, err := manet.ResolveUnspecifiedAddress(ma, ifaces)
+		if err != nil {
+			continue
+		}
+		resolved = append(resolved, rs...)
+	}
+	return ShareableAddrs(resolved)
+}
+
+// ConnectAddrs connects to a peer known by ID and a list of addresses (without
+// the /p2p suffix).
+func (n *Node) ConnectAddrs(ctx context.Context, pid peer.ID, addrs []string) error {
+	info := peer.AddrInfo{ID: pid}
+	for _, a := range addrs {
+		if ma, err := multiaddr.NewMultiaddr(a); err == nil {
+			info.Addrs = append(info.Addrs, ma)
+		}
+	}
+	if len(info.Addrs) == 0 {
+		return fmt.Errorf("no known address for %s", pid)
+	}
+	return n.host.Connect(ctx, info)
+}
+
+// Connected reports whether the node has a live connection to p.
+func (n *Node) Connected(p peer.ID) bool {
+	return n.host.Network().Connectedness(p) == network.Connected
 }
 
 // ConnectInfo connects to a peer given its discovered address info.
@@ -106,22 +204,8 @@ func (n *Node) Connect(ctx context.Context, addr string) (peer.ID, error) {
 // Close shuts the host down.
 func (n *Node) Close() error { return n.host.Close() }
 
-// PeerIDFromPubKeyHex derives a libp2p peer ID from a hex Ed25519 public key
-// (the format the trust store uses), so a trusted key can be located on the DHT.
-func PeerIDFromPubKeyHex(h string) (peer.ID, error) {
-	raw, err := hex.DecodeString(h)
-	if err != nil {
-		return "", err
-	}
-	pub, err := crypto.UnmarshalEd25519PublicKey(raw)
-	if err != nil {
-		return "", err
-	}
-	return peer.IDFromPublicKey(pub)
-}
-
 // PeerPubKeyHex returns the hex Ed25519 public key for a peer ID (the key is
-// inlined in the ID), matching the format used by the trust and reputation stores.
+// inlined in the ID), matching the format used by the friend list and reputation store.
 func PeerPubKeyHex(id peer.ID) (string, error) {
 	pub, err := id.ExtractPublicKey()
 	if err != nil {

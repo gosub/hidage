@@ -31,7 +31,7 @@ func (n *Node) registerObjectHandler() {
 		}
 		id = id[:len(id)-1] // strip newline
 
-		data, err := n.blobs.Get(id)
+		data, err := n.lookup(s.Conn().RemotePeer(), id)
 		if err != nil {
 			s.Write([]byte{0}) // missing (or unreadable)
 			return
@@ -46,30 +46,19 @@ func (n *Node) registerObjectHandler() {
 	})
 }
 
-// GetObject resolves an object by content address: it serves from the local
-// blob store if present, otherwise discovers providers via the DHT and fetches
-// from the first that answers.
-func (n *Node) GetObject(ctx context.Context, id string) ([]byte, error) {
+// GetObject returns an object by content address: from the local blob store if
+// present, otherwise from the first of peers that has it.
+func (n *Node) GetObject(ctx context.Context, id string, peers []peer.ID) ([]byte, error) {
 	if n.blobs != nil {
 		if data, err := n.blobs.Get(id); err == nil {
 			return data, nil
 		}
 	}
-	if n.dht == nil {
-		return nil, ErrObjectNotFound
-	}
-	provs, err := n.FindProviders(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	for _, p := range provs {
-		if p.ID == n.host.ID() {
+	for _, p := range peers {
+		if p == n.host.ID() {
 			continue
 		}
-		if len(p.Addrs) > 0 {
-			n.host.Connect(ctx, p)
-		}
-		if data, err := n.FetchObject(ctx, p.ID, id); err == nil {
+		if data, err := n.FetchObject(ctx, p, id); err == nil {
 			return data, nil
 		}
 	}
@@ -103,6 +92,9 @@ func (n *Node) FetchObject(ctx context.Context, p peer.ID, id string) ([]byte, e
 		return nil, fmt.Errorf("read length: %w", err)
 	}
 	n64 := binary.BigEndian.Uint64(lenBuf[:])
+	if n64 > MaxObjectSize {
+		return nil, fmt.Errorf("object too large: %d > %d", n64, MaxObjectSize)
+	}
 	data := make([]byte, n64)
 	if _, err := io.ReadFull(s, data); err != nil {
 		return nil, fmt.Errorf("read object: %w", err)

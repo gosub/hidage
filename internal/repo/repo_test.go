@@ -5,8 +5,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"hidage/internal/crypto"
+	"hidage/internal/dag"
 	"hidage/internal/identity"
 )
 
@@ -63,6 +65,43 @@ func TestSnapshotRestoreRoundtrip(t *testing.T) {
 		if string(got) != want {
 			t.Fatalf("%s = %q, want %q", rel, got, want)
 		}
+	}
+}
+
+func TestModTimePreservedOnRestore(t *testing.T) {
+	r, priv, folder := newRepo(t)
+	want := time.Unix(1_600_000_000, 0)
+	if err := os.Chtimes(filepath.Join(folder, "a.txt"), want, want); err != nil {
+		t.Fatal(err)
+	}
+	snap, _, err := r.Snapshot(priv, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := t.TempDir()
+	if err := r.Restore(snap, out); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(filepath.Join(out, "data", "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.ModTime().Equal(want) {
+		t.Fatalf("restored mtime = %v, want %v", fi.ModTime(), want)
+	}
+}
+
+func TestUnsupportedEntriesReported(t *testing.T) {
+	r, priv, folder := newRepo(t)
+	if err := os.Symlink("a.txt", filepath.Join(folder, "link")); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+	_, stats, err := r.Snapshot(priv, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats.Skipped) != 1 || filepath.Base(stats.Skipped[0]) != "link" {
+		t.Fatalf("expected the symlink to be reported skipped, got %v", stats.Skipped)
 	}
 }
 
@@ -198,5 +237,195 @@ func TestForgetAndPrune(t *testing.T) {
 	out := t.TempDir()
 	if err := r.Restore(snapB, out); err != nil {
 		t.Fatalf("snapB should still restore after prune: %v", err)
+	}
+}
+
+func TestAdoptRebuildsRepository(t *testing.T) {
+	r, priv, _ := newRepo(t)
+	snap, _, err := r.Snapshot(priv, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs, err := r.PublishSet(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func(id string) ([]byte, error) {
+		if d, ok := objs[id]; ok {
+			return d, nil
+		}
+		return nil, os.ErrNotExist
+	}
+
+	// On a "new machine": restore the files, then adopt the restored folder.
+	out := t.TempDir()
+	l := dag.NewLoader(getterFunc(get), getterFunc(get), r.masterKey)
+	if err := RestoreWith(l, snap, out); err != nil {
+		t.Fatal(err)
+	}
+	name, err := RootName(l, snap)
+	if err != nil || name != "data" {
+		t.Fatalf("RootName = %q, %v", name, err)
+	}
+	adopted, err := Adopt(filepath.Join(out, name), r.masterKey, t.TempDir(), r.RepoID(), objs[snap.ID], get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted.RepoID() != r.RepoID() {
+		t.Fatalf("repo id %s, want %s", adopted.RepoID(), r.RepoID())
+	}
+	latest, err := adopted.Latest()
+	if err != nil || latest == nil || latest.ID != snap.ID {
+		t.Fatalf("adopted latest = %+v, %v", latest, err)
+	}
+	// The adopted repo yields the identical publish set (so re-publishing renews).
+	again, err := adopted.PublishSet(latest)
+	if err != nil || len(again) != len(objs) {
+		t.Fatalf("publish set: %d objects, %v; want %d", len(again), err, len(objs))
+	}
+	for id, d := range objs {
+		if string(again[id]) != string(d) {
+			t.Fatalf("object %s differs after adopt", id)
+		}
+	}
+	// A new snapshot of the unchanged folder stores nothing new.
+	if _, stats, err := adopted.Snapshot(priv, false); err != nil || stats.NewObjects != 0 {
+		t.Fatalf("snapshot after adopt stored %d new objects (%v), want 0", stats.NewObjects, err)
+	}
+}
+
+func TestSnapshotIfChanged(t *testing.T) {
+	r, priv, folder := newRepo(t)
+	first, stats, err := r.SnapshotIfChanged(priv)
+	if err != nil || stats.Unchanged {
+		t.Fatalf("first snapshot: %+v, %v", stats, err)
+	}
+	same, stats, err := r.SnapshotIfChanged(priv)
+	if err != nil || !stats.Unchanged || same.ID != first.ID {
+		t.Fatalf("unchanged folder: %+v, %v", stats, err)
+	}
+	writeFile(t, filepath.Join(folder, "a.txt"), "alpha 2")
+	next, stats, err := r.SnapshotIfChanged(priv)
+	if err != nil || stats.Unchanged || next.Parent != first.ID {
+		t.Fatalf("changed folder: %+v, %v", stats, err)
+	}
+	if snaps, _ := r.ListSnapshots(); len(snaps) != 2 {
+		t.Fatalf("%d snapshots, want 2", len(snaps))
+	}
+}
+
+func TestRestorePathAndList(t *testing.T) {
+	r, priv, _ := newRepo(t)
+	snap, _, err := r.Snapshot(priv, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := r.Loader()
+	out := t.TempDir()
+	if err := RestorePath(l, snap, "sub/b.txt", out); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(out, "b.txt")); err != nil || string(got) != "bravo" {
+		t.Fatalf("b.txt = %q, %v", got, err)
+	}
+	if err := RestorePath(l, snap, "sub", out); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(out, "sub", "c.txt")); string(got) != "charlie" {
+		t.Fatalf("sub/c.txt = %q", got)
+	}
+	if err := RestorePath(l, snap, "nope", out); err == nil {
+		t.Fatal("missing path restored")
+	}
+	if err := RestorePath(l, snap, "a.txt/x", out); err == nil {
+		t.Fatal("path through a file restored")
+	}
+	entries, err := List(l, snap, "")
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("List top = %d entries, %v", len(entries), err)
+	}
+	if entries, _ := List(l, snap, "sub"); len(entries) != 2 {
+		t.Fatalf("List sub = %d entries", len(entries))
+	}
+}
+
+func TestRetention(t *testing.T) {
+	base := time.Date(2026, 10, 21, 12, 0, 0, 0, time.Local)
+	var snaps []*Snapshot
+	add := func(id string, ago time.Duration) {
+		snaps = append(snaps, &Snapshot{ID: id, CreatedAt: base.Add(-ago)})
+	}
+	add("now", 0)
+	add("now-1h", time.Hour)
+	add("now-2h", 2*time.Hour)
+	add("yesterday", 24*time.Hour)
+	add("yesterday-early", 26*time.Hour)
+	add("3days", 72*time.Hour)
+	add("2weeks", 14*24*time.Hour)
+	add("5weeks", 35*24*time.Hour)
+
+	keep := Retention{KeepLast: 2, KeepDaily: 3, KeepWeekly: 3}.Retained(snaps)
+	want := []string{"now", "now-1h", "yesterday", "3days", "2weeks"}
+	for _, id := range want {
+		if !keep[id] {
+			t.Errorf("%s should be kept", id)
+		}
+	}
+	for _, id := range []string{"now-2h", "yesterday-early", "5weeks"} {
+		if keep[id] {
+			t.Errorf("%s should not be kept", id)
+		}
+	}
+	if k := (Retention{}).Retained(snaps); len(k) != 1 || !k["now"] {
+		t.Fatalf("zero policy keeps %v, want just the newest", k)
+	}
+}
+
+func TestImportOlderVersionAndReleaseCache(t *testing.T) {
+	r, priv, folder := newRepo(t)
+	v1, _, _ := r.Snapshot(priv, false)
+	objs1, _ := r.PublishSet(v1)
+	writeFile(t, filepath.Join(folder, "a.txt"), "alpha 2")
+	v2, _, _ := r.Snapshot(priv, false)
+	objs2, _ := r.PublishSet(v2)
+	get := func(m map[string][]byte) func(string) ([]byte, error) {
+		return func(id string) ([]byte, error) {
+			if d, ok := m[id]; ok {
+				return d, nil
+			}
+			return nil, os.ErrNotExist
+		}
+	}
+	out := t.TempDir()
+	l := dag.NewLoader(getterFunc(get(objs2)), getterFunc(get(objs2)), r.masterKey)
+	RestoreWith(l, v2, out)
+	adopted, err := Adopt(filepath.Join(out, "data"), r.masterKey, t.TempDir(), r.RepoID(), objs2[v2.ID], get(objs2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adopted.Import(objs1[v1.ID], get(objs1)); err != nil {
+		t.Fatal(err)
+	}
+	snaps, _ := adopted.ListSnapshots()
+	if len(snaps) != 2 {
+		t.Fatalf("%d snapshots after importing history, want 2", len(snaps))
+	}
+	restored := t.TempDir()
+	if err := RestorePath(adopted.Loader(), v1, "a.txt", restored); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(restored, "a.txt")); string(got) != "alpha" {
+		t.Fatalf("old version a.txt = %q", got)
+	}
+
+	if err := adopted.SaveRelease(v1.ID, []byte("rel")); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := adopted.LoadRelease(v1.ID); err != nil || string(b) != "rel" {
+		t.Fatalf("LoadRelease = %q, %v", b, err)
+	}
+	adopted.Forget(v1.ID)
+	if _, err := adopted.LoadRelease(v1.ID); err == nil {
+		t.Fatal("forget should drop the cached release")
 	}
 }

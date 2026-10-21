@@ -1,6 +1,8 @@
-// Command hidage is the CLI for hidden storage: it encrypts, fountain-shards,
-// and reassembles files and folders. The MVP keeps shards in a local
-// content-addressed store; later phases distribute them across a P2P network.
+// Command hidage is the CLI for hidden storage: an encrypted, versioned,
+// distributed backup tool. It snapshots folders into a content-addressed
+// repository (deterministic encryption + Merkle DAG + signed snapshots), then
+// erasure-codes a snapshot into shards spread across libp2p peers, with
+// proof-of-storage audits, reputation, and space accounting keeping hosts honest.
 package main
 
 import (
@@ -8,38 +10,44 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"hidage/internal/config"
 )
+
+// version is set at release time with -ldflags "-X main.buildVersion=v1.2.3".
+var buildVersion = "dev"
 
 func main() {
 	root := &cobra.Command{
 		Use:           "hidage",
-		Short:         "hidage — encrypted, versioned, distributed backup",
+		Short:         "hidage: encrypted, versioned backups with your friends",
+		Version:       buildVersion,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			_, err := config.Load() // surface a malformed config.toml before doing anything
+			return err
+		},
 	}
 	root.PersistentFlags().StringVarP(&chdirFlag, "chdir", "C", "",
 		"operate as if started in this directory (repository discovery walks up from here)")
+	root.CompletionOptions.HiddenDefaultCmd = true
 	root.AddCommand(
 		newInitCmd(),
-		newSnapshotCmd(),
-		newSnapshotsCmd(),
+		newIDCmd(),
+		newFriendCmd(),
+		newBackupCmd(),
 		newRestoreCmd(),
-		newDiffCmd(),
+		newLogCmd(),
 		newForgetCmd(),
-		newPruneCmd(),
-		newRecoveryCodeCmd(),
-		newRecoverCmd(),
-		newTrustCmd(),
-		newServeCmd(),
-		newPublishCmd(),
-		newNetRestoreCmd(),
-		newNetListCmd(),
-		newReputationCmd(),
-		newAuditCmd(),
-		newAccountingCmd(),
+		newStatusCmd(),
+		newDaemonCmd(),
 	)
 	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		// A degraded-backup status is a non-zero exit, not an error to print.
+		if _, ok := err.(*degradedError); !ok {
+			fmt.Fprintln(os.Stderr, "error:", err)
+		}
 		os.Exit(1)
 	}
 }

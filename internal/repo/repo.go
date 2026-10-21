@@ -89,7 +89,7 @@ func openDataStore(dataDir, repoID string) (store.Store, error) {
 		return nil, fmt.Errorf("cannot use data store at %s: permission denied.\n"+
 			"Create it once, e.g.:\n"+
 			"  sudo mkdir -p %s && sudo chown \"$USER\" %s\n"+
-			"or set HIDAGE_STORE to a writable path.", dataDir, dataDir, dataDir)
+			"or set `store` in ~/.config/hidage/config.toml (or HIDAGE_STORE) to a writable path.", dataDir, dataDir, dataDir)
 	}
 	return nil, err
 }
@@ -97,6 +97,14 @@ func openDataStore(dataDir, repoID string) (store.Store, error) {
 // Init creates a repository in folder, with chunk data going to dataDir and
 // objects encrypted under masterKey. It fails if folder is already a repo.
 func Init(folder string, masterKey []byte, dataDir string) (*Repo, error) {
+	idBytes := make([]byte, 16)
+	if _, err := rand.Read(idBytes); err != nil {
+		return nil, err
+	}
+	return initWithID(folder, masterKey, dataDir, hex.EncodeToString(idBytes))
+}
+
+func initWithID(folder string, masterKey []byte, dataDir, repoID string) (*Repo, error) {
 	folder, err := filepath.Abs(folder)
 	if err != nil {
 		return nil, err
@@ -109,11 +117,7 @@ func Init(folder string, masterKey []byte, dataDir string) (*Repo, error) {
 			return nil, fmt.Errorf("create %s: %w", d, err)
 		}
 	}
-	idBytes := make([]byte, 16)
-	if _, err := rand.Read(idBytes); err != nil {
-		return nil, err
-	}
-	cfg := Config{Version: 1, RepoID: hex.EncodeToString(idBytes)}
+	cfg := Config{Version: 1, RepoID: repoID}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return nil, err
