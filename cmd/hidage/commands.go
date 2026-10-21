@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -202,7 +203,7 @@ Snapshot ids may be shortened to any unambiguous prefix.`,
 				return errors.New("say where to restore with --to <dir> (or use --list to look first)")
 			}
 			// Refuse to overwrite unless asked.
-			dest := filepath.Join(to, filepath.Base(path))
+			dest := filepath.Join(to, repo.PortableName(path[strings.LastIndex(path, "/")+1:])) // snapshot paths use "/"
 			if path == "" {
 				name, err := repo.RootName(l, snap)
 				if err != nil {

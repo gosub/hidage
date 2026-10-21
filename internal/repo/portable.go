@@ -19,11 +19,11 @@ type Renamed struct {
 // APFS), so "a.txt" and "A.txt" in one directory would overwrite each other.
 var caseInsensitive = runtime.GOOS == "windows" || runtime.GOOS == "darwin"
 
-// portableName returns name escaped so this OS can create it. Only Windows
+// PortableName returns name escaped so this OS can create it. Only Windows
 // restricts names beyond "/" and NUL; there, reserved characters, control
 // characters, a trailing dot or space and device names such as CON are written
 // as %XX, so the original is still readable.
-func portableName(name string) string {
+func PortableName(name string) string {
 	if runtime.GOOS != "windows" {
 		return name
 	}
@@ -78,7 +78,7 @@ func (d dirNames) key(name string) string {
 // claim returns the name to restore name under: its portable form, made unique
 // in this directory with a " (2)", " (3)", ... suffix before the extension.
 func (d dirNames) claim(name string) string {
-	out := portableName(name)
+	out := PortableName(name)
 	if !d[d.key(out)] {
 		d[d.key(out)] = true
 		return out
