@@ -204,7 +204,7 @@ peers, one killed, full byte-identical recovery from the survivors).
 
 - **Peer selection** — `backup` spreads to your reachable friends, or `--peer` names a
   host explicitly. There is no discovery of strangers' storage. Erasure coding only helps across enough distinct
-  peers, so `--min-peers` guards against (and a single-peer publish warns about)
+  peers, so `--min-friends` guards against (and a single-peer publish warns about)
   configurations with no fault tolerance.
 - **Reachability** — nodes behind NATs reach each other through a friend's relay (then
   hole punching), so at least one friend in the group needs a public address (a port
@@ -226,8 +226,8 @@ peers, one killed, full byte-identical recovery from the survivors).
 - **Phase 2 — versioned storage core.** ✅ Done. The repository: content-defined chunking
   + Merkle DAG + signed snapshots, so updating/changing/removing files re-stores only the
   delta, with history and prune/GC.
-- **Phase 3 — networking + trust + recovery.** ✅ Done. Recovery code (`recovery-code` /
-  `recover`); a friend list (`friend …`, formerly a trust whitelist); a **libp2p** node (`daemon`) keyed by the
+- **Phase 3 — networking + trust + recovery.** ✅ Done. Recovery code (`id --kit` /
+  `init --recover`); a friend list (`friend …`, formerly a trust whitelist); a **libp2p** node (`daemon`) keyed by the
   Ed25519 identity with object + push protocols (originally over a Kademlia DHT, since
   removed in favour of talking to friends directly); publishing
   replicates a snapshot's objects (bytes, DAG nodes, chunks) to friends and posts a
