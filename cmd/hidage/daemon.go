@@ -174,7 +174,7 @@ func daemonKeys() (*keyring.Keyring, identity.Identity, error) {
 		return nil, identity.Identity{}, err
 	}
 	if !keyring.Exists(paths.KeyringPath) {
-		return nil, identity.Identity{}, fmt.Errorf("no keyring found; run `hidage init` (or `hidage recover`) first")
+		return nil, identity.Identity{}, fmt.Errorf("no keyring found; run `hidage init` (or `hidage init --recover`) first")
 	}
 	pass, perr := readPassphrase(false)
 	if perr == nil {

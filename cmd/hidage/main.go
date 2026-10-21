@@ -17,7 +17,7 @@ import (
 func main() {
 	root := &cobra.Command{
 		Use:           "hidage",
-		Short:         "hidage — encrypted, versioned, distributed backup",
+		Short:         "hidage: encrypted, versioned backups with your friends",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
@@ -27,24 +27,17 @@ func main() {
 	}
 	root.PersistentFlags().StringVarP(&chdirFlag, "chdir", "C", "",
 		"operate as if started in this directory (repository discovery walks up from here)")
+	root.CompletionOptions.HiddenDefaultCmd = true
 	root.AddCommand(
 		newInitCmd(),
-		newSnapshotCmd(),
-		newSnapshotsCmd(),
-		newStatusCmd(),
-		newRestoreCmd(),
-		newDiffCmd(),
-		newForgetCmd(),
-		newPruneCmd(),
-		newRecoveryCodeCmd(),
-		newRecoverCmd(),
 		newIDCmd(),
 		newFriendCmd(),
+		newBackupCmd(),
+		newRestoreCmd(),
+		newLogCmd(),
+		newForgetCmd(),
+		newStatusCmd(),
 		newDaemonCmd(),
-		newPublishCmd(),
-		newNetRestoreCmd(),
-		newNetListCmd(),
-		newAuditCmd(),
 	)
 	if err := root.Execute(); err != nil {
 		// A degraded-backup status is a non-zero exit, not an error to print.

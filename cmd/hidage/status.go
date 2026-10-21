@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"hidage/internal/config"
+	"hidage/internal/p2p"
+	"hidage/internal/repo"
 )
 
 // newStatusCmd reports, for the current repository, whether its data is
@@ -16,11 +20,18 @@ import (
 // and any peers currently failing audits. It exits non-zero when the backup is
 // degraded, so it composes with cron/monitoring.
 func newStatusCmd() *cobra.Command {
-	return &cobra.Command{
+	var audit bool
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show whether the current repository's backup is protected, and how protected",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if audit {
+				if err := auditNow(); err != nil {
+					return err
+				}
+				fmt.Println()
+			}
 			r, err := discoverRepoNoKey() // reads only signed metadata + local state
 			if err != nil {
 				return err
@@ -57,7 +68,7 @@ func newStatusCmd() *cobra.Command {
 				fmt.Println("  daemon:        not running (backups happen only when you run them)")
 			}
 			if len(snaps) == 0 {
-				warn("no snapshots yet — nothing is backed up (run `hidage snapshot`)")
+				warn("no snapshots yet — nothing is backed up (run `hidage backup`)")
 				return exitCode(degraded)
 			}
 			latest := snaps[len(snaps)-1]
@@ -66,7 +77,7 @@ func newStatusCmd() *cobra.Command {
 
 			dist, err := readDistribution(r.HidageFile("distribution.json"))
 			if err != nil {
-				warn("never published — the backup exists only on this machine (run `hidage publish`)")
+				warn("never published — the backup exists only on this machine (run `hidage backup`)")
 				return exitCode(degraded)
 			}
 
@@ -76,16 +87,16 @@ func newStatusCmd() *cobra.Command {
 			case dist.SnapshotID == latest.ID:
 				fmt.Printf("  published:     up to date (%s ago)\n", humanAge(time.Since(dist.PublishedAt)))
 			default:
-				warn("latest snapshot is NOT published — publish %s is stale (run `hidage publish`)", short(dist.SnapshotID))
+				warn("latest snapshot is NOT published — publish %s is stale (run `hidage backup`)", short(dist.SnapshotID))
 			}
 			// Friends drop a backup that isn't renewed within their lease; assume
 			// theirs matches ours.
 			lease := time.Duration(settings.Hosting.LeaseDays) * 24 * time.Hour
 			if left := lease - time.Since(dist.PublishedAt); left < 14*24*time.Hour {
 				if left <= 0 {
-					warn("last publish was %s ago: friends may have dropped this backup (run `hidage publish`)", humanAge(time.Since(dist.PublishedAt)))
+					warn("last publish was %s ago: friends may have dropped this backup (run `hidage backup`)", humanAge(time.Since(dist.PublishedAt)))
 				} else {
-					warn("friends drop this backup in about %s unless it is re-published (run `hidage publish`)", humanAge(left))
+					warn("friends drop this backup in about %s unless it is re-published (run `hidage backup`)", humanAge(left))
 				}
 			}
 
@@ -112,7 +123,7 @@ func newStatusCmd() *cobra.Command {
 					name = f.Nickname
 					switch a := f.LastAudit; {
 					case a == nil:
-						state = "not audited yet (run `hidage audit`)"
+						state = "not audited yet (run `hidage status --audit`)"
 					case a.OK():
 						state = fmt.Sprintf("good (audited %s ago)", humanAge(time.Since(a.At)))
 					default:
@@ -130,11 +141,42 @@ func newStatusCmd() *cobra.Command {
 			if failing > tolerate {
 				warn("%d peer(s) are failing audits but tolerance is only %d — data may be unrecoverable", failing, tolerate)
 			} else if failing > 0 {
-				warn("%d peer(s) are failing audits — re-publish to restore redundancy", failing)
+				warn("%d peer(s) are failing audits : run `hidage backup` to restore redundancy", failing)
 			}
 			return exitCode(degraded)
 		},
 	}
+	cmd.Flags().BoolVar(&audit, "audit", false, "first challenge the friends holding this folder's data to prove they still have it")
+	return cmd
+}
+
+// auditNow audits the current repository's friends (status --audit).
+func auditNow() error {
+	folder := repo.Find(startDir())
+	if folder == "" {
+		return fmt.Errorf("not inside a hidage repository (run `hidage backup <folder>` to create one)")
+	}
+	kr, err := unlock()
+	if err != nil {
+		return err
+	}
+	r, err := repo.Open(folder, kr.MasterKey(), config.DataStoreDir())
+	if err != nil {
+		return err
+	}
+	book, err := loadFriends()
+	if err != nil {
+		return err
+	}
+	node, err := p2p.New(kr.Identity(), nil, nil)
+	if err != nil {
+		return err
+	}
+	defer node.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	fmt.Println("Auditing friends:")
+	return auditRepo(ctx, node, r, book, nil, false, os.Stdout)
 }
 
 // assessPeers computes, for a published distribution, how many peers can be lost

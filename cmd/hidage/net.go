@@ -16,13 +16,13 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
-	"github.com/spf13/cobra"
 
 	"hidage/internal/account"
 	"hidage/internal/config"
 	"hidage/internal/dag"
 	"hidage/internal/friends"
 	"hidage/internal/hosting"
+	"hidage/internal/keyring"
 	"hidage/internal/netstore"
 	"hidage/internal/p2p"
 	"hidage/internal/pack"
@@ -93,52 +93,6 @@ func reapLoop(ctx context.Context, h *hosting.Host, lease, trashAge time.Duratio
 		case <-time.After(time.Hour):
 		}
 	}
-}
-
-func newPublishCmd() *cobra.Command {
-	var opts publishOpts
-	cmd := &cobra.Command{
-		Use:   "publish",
-		Short: "Erasure-code the latest snapshot, spread shards across peers, publish the head",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			kr, err := unlock()
-			if err != nil {
-				return err
-			}
-			folder := repo.Find(startDir())
-			if folder == "" {
-				return fmt.Errorf("not inside a hidage repository")
-			}
-			r, err := repo.Open(folder, kr.MasterKey(), config.DataStoreDir())
-			if err != nil {
-				return err
-			}
-			book, err := loadFriends()
-			if err != nil {
-				return err
-			}
-			settings, _ := config.Load()
-			if !cmd.Flags().Changed("redundancy") {
-				opts.redundancy = settings.Backup.Redundancy
-			}
-			if !cmd.Flags().Changed("min-peers") {
-				opts.minPeers = settings.Backup.MinFriends
-			}
-			node, err := p2p.New(kr.Identity(), nil, nil)
-			if err != nil {
-				return err
-			}
-			defer node.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
-			return publishRepo(ctx, node, kr, r, book, opts, os.Stdout)
-		},
-	}
-	cmd.Flags().StringArrayVar(&opts.peers, "peer", nil, "push to this peer multiaddr instead of your friends")
-	cmd.Flags().IntVar(&opts.minPeers, "min-peers", 0, "fail unless at least this many acceptable peers are reachable (default: backup.min_friends)")
-	cmd.Flags().Float64Var(&opts.redundancy, "redundancy", 0, "shards to emit per shard needed, e.g. 2.0 tolerates losing half (default: backup.redundancy)")
-	return cmd
 }
 
 type peerID struct {
@@ -239,99 +193,113 @@ func fetchManifest(ctx context.Context, node *p2p.Node, peers []peer.ID) *accoun
 	return m
 }
 
-func newNetRestoreCmd() *cobra.Command {
-	var from []string
-	var repoSel string
-	var all, filesOnly bool
-	cmd := &cobra.Command{
-		Use:   "net-restore <out-dir>",
-		Short: "Recover backups from your friends (head → account manifest → shards)",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			kr, err := unlock()
-			if err != nil {
-				return err
-			}
-			node, err := p2p.New(kr.Identity(), nil, nil)
-			if err != nil {
-				return err
-			}
-			defer node.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-			defer cancel()
-			sources, err := recoverySources(ctx, node, from)
-			if err != nil {
-				return err
-			}
-			manifest, err := resolveManifest(ctx, node, sources)
-			if err != nil {
-				return err
-			}
-			// The manifest's roster names friends this machine may not know yet
-			// (it may be brand new): add them and ask them too, in case one holds
-			// a newer head or shards the others lack.
-			if added := importRoster(manifest, kr.MasterKey()); added > 0 {
-				fmt.Printf("Restored %d friend(s) from your backup's friend list.\n", added)
-				book, err := loadFriends()
-				if err != nil {
-					return err
-				}
-				more := peerIDs(reachFriends(ctx, node, book, false))
-				sources = mergePeers(sources, more)
-				if m, err := resolveManifest(ctx, node, sources); err == nil {
-					manifest = m
-				}
-			}
-
-			cache, err := store.NewKeyedStore(filepath.Join(config.DataStoreDir(), "cache"))
-			if err != nil {
-				return err
-			}
-			ns := netstore.New(node, cache, sources)
-			if len(manifest.Entries) == 0 {
-				return fmt.Errorf("you have no published backups")
-			}
-
-			// Choose which backup(s) to restore.
-			var targets []account.Entry
-			switch {
-			case all:
-				targets = manifest.Entries
-			case repoSel != "":
-				e, err := manifest.Find(repoSel)
-				if err != nil {
-					return err
-				}
-				targets = []account.Entry{*e}
-			case len(manifest.Entries) == 1:
-				targets = manifest.Entries
-			default:
-				fmt.Println("Multiple backups found; pick one with --repo <name> or use --all:")
-				for _, e := range manifest.Entries {
-					fmt.Printf("  %-24s  %s\n", e.Name, e.RepoID[:12])
-				}
-				return fmt.Errorf("specify --repo or --all")
-			}
-
-			for _, e := range targets {
-				folder, err := restoreRelease(ns, cache, kr.MasterKey(), e, args[0], !filesOnly)
-				if err != nil {
-					return fmt.Errorf("restore %q: %w", e.Name, err)
-				}
-				fmt.Printf("Recovered %q into %s\n", e.Name, folder)
-			}
-			if !filesOnly {
-				fmt.Println("The restored folders are hidage repositories again: run `hidage publish` in each")
-				fmt.Println("to resume backing up (it only renews what your friends already hold).")
-			}
-			return nil
-		},
+// restoreFromFriends recovers the latest published version of your backups
+// from your friends (plus the --from peers) into outDir: the head names the
+// account manifest, whose roster may add friends this machine doesn't know;
+// each release is rebuilt from K-of-M shards and, unless filesOnly, the restored
+// folder becomes its repository again.
+func restoreFromFriends(kr *keyring.Keyring, outDir string, from []string, repoSel string, all, filesOnly bool) error {
+	node, err := p2p.New(kr.Identity(), nil, nil)
+	if err != nil {
+		return err
 	}
-	cmd.Flags().StringArrayVar(&from, "from", nil, "also recover from this friend (contact card or /p2p multiaddr), e.g. on a new machine")
-	cmd.Flags().StringVar(&repoSel, "repo", "", "which backup to restore (name or repo-id prefix)")
-	cmd.Flags().BoolVar(&all, "all", false, "restore every backup in the account")
-	cmd.Flags().BoolVar(&filesOnly, "files-only", false, "restore the files only, without making the folders repositories again")
-	return cmd
+	defer node.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	sources, err := recoverySources(ctx, node, from)
+	if err != nil {
+		return err
+	}
+	manifest, err := resolveManifest(ctx, node, sources)
+	if err != nil {
+		return err
+	}
+	// The manifest's roster names friends this machine may not know yet
+	// (it may be brand new): add them and ask them too, in case one holds
+	// a newer head or shards the others lack.
+	if added := importRoster(manifest, kr.MasterKey()); added > 0 {
+		fmt.Printf("Restored %d friend(s) from your backup's friend list.\n", added)
+		book, err := loadFriends()
+		if err != nil {
+			return err
+		}
+		more := peerIDs(reachFriends(ctx, node, book, false))
+		sources = mergePeers(sources, more)
+		if m, err := resolveManifest(ctx, node, sources); err == nil {
+			manifest = m
+		}
+	}
+
+	cache, err := store.NewKeyedStore(filepath.Join(config.DataStoreDir(), "cache"))
+	if err != nil {
+		return err
+	}
+	ns := netstore.New(node, cache, sources)
+	if len(manifest.Entries) == 0 {
+		return fmt.Errorf("you have no published backups")
+	}
+
+	// Choose which backup(s) to restore.
+	var targets []account.Entry
+	switch {
+	case all:
+		targets = manifest.Entries
+	case repoSel != "":
+		e, err := manifest.Find(repoSel)
+		if err != nil {
+			return err
+		}
+		targets = []account.Entry{*e}
+	case len(manifest.Entries) == 1:
+		targets = manifest.Entries
+	default:
+		fmt.Println("Multiple backups found; pick one with --repo <name> or use --all:")
+		for _, e := range manifest.Entries {
+			fmt.Printf("  %-24s  %s\n", e.Name, e.RepoID[:12])
+		}
+		return fmt.Errorf("specify --repo or --all")
+	}
+
+	for _, e := range targets {
+		folder, err := restoreRelease(ns, cache, kr.MasterKey(), e, outDir, !filesOnly)
+		if err != nil {
+			return fmt.Errorf("restore %q: %w", e.Name, err)
+		}
+		fmt.Printf("Recovered %q into %s\n", e.Name, folder)
+	}
+	if !filesOnly {
+		fmt.Println("The restored folders are hidage repositories again: run `hidage backup <folder>`")
+		fmt.Println("in each to resume (it only renews what your friends already hold).")
+	}
+	return nil
+}
+
+// listFromFriends prints the backups your account manifest indexes.
+func listFromFriends(kr *keyring.Keyring, from []string) error {
+	node, err := p2p.New(kr.Identity(), nil, nil)
+	if err != nil {
+		return err
+	}
+	defer node.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	sources, err := recoverySources(ctx, node, from)
+	if err != nil {
+		return err
+	}
+	manifest, err := resolveManifest(ctx, node, sources)
+	if err != nil {
+		return err
+	}
+	if len(manifest.Entries) == 0 {
+		fmt.Println("(no backups published to your friends)")
+		return nil
+	}
+	fmt.Printf("%-24s  %-12s  %s\n", "NAME", "REPO-ID", "PUBLISHED")
+	for _, e := range manifest.Entries {
+		fmt.Printf("%-24s  %-12s  %s\n", e.Name, e.RepoID[:12], e.UpdatedAt.Local().Format("2006-01-02 15:04:05"))
+	}
+	return nil
 }
 
 // recoverySources reaches every friend in the friend list plus the extra peers

@@ -79,14 +79,14 @@ func readPassphrase(confirm bool) (string, error) {
 }
 
 // unlock loads and unlocks the user keyring, prompting for the passphrase. It
-// requires `hidage init` (or `hidage recover`) to have run.
+// requires `hidage init` (or `hidage init --recover`) to have run.
 func unlock() (*keyring.Keyring, error) {
 	paths, err := config.Resolve()
 	if err != nil {
 		return nil, err
 	}
 	if !keyring.Exists(paths.KeyringPath) {
-		return nil, fmt.Errorf("no keyring found; run `hidage init` (or `hidage recover`) first")
+		return nil, fmt.Errorf("no keyring found; run `hidage init` (or `hidage init --recover`) first")
 	}
 	pass, err := readPassphrase(false)
 	if err != nil {
@@ -100,7 +100,7 @@ func unlock() (*keyring.Keyring, error) {
 func discoverRepo() (*repo.Repo, error) {
 	folder := repo.Find(startDir())
 	if folder == "" {
-		return nil, fmt.Errorf("not inside a hidage repository (run `hidage snapshot` to create one)")
+		return nil, fmt.Errorf("not inside a hidage repository (run `hidage backup <folder>` to create one)")
 	}
 	kr, err := unlock()
 	if err != nil {
@@ -116,7 +116,7 @@ func discoverRepo() (*repo.Repo, error) {
 func discoverRepoNoKey() (*repo.Repo, error) {
 	folder := repo.Find(startDir())
 	if folder == "" {
-		return nil, fmt.Errorf("not inside a hidage repository (run `hidage snapshot` to create one)")
+		return nil, fmt.Errorf("not inside a hidage repository (run `hidage backup <folder>` to create one)")
 	}
 	return repo.Open(folder, nil, config.DataStoreDir())
 }

@@ -54,7 +54,7 @@ func ownPublicKey() (ed25519.PublicKey, error) {
 		return nil, err
 	}
 	if !keyring.Exists(paths.KeyringPath) {
-		return nil, fmt.Errorf("no keyring found; run `hidage init` (or `hidage recover`) first")
+		return nil, fmt.Errorf("no keyring found; run `hidage init` (or `hidage init --recover`) first")
 	}
 	pub, err := keyring.PublicKey(paths.KeyringPath)
 	if errors.Is(err, keyring.ErrNoPublicKey) {
@@ -142,10 +142,10 @@ func openInvites() (*friends.Invites, error) {
 }
 
 func newIDCmd() *cobra.Command {
-	var cardOnly bool
+	var cardOnly, kit bool
 	cmd := &cobra.Command{
 		Use:   "id",
-		Short: "Show this node's identity and contact card (give the card to a friend)",
+		Short: "Show your identity and contact card; --kit prints your recovery kit",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pub, err := ownPublicKey()
@@ -159,6 +159,9 @@ func newIDCmd() *cobra.Command {
 			if cardOnly {
 				fmt.Println(card.Encode())
 				return nil
+			}
+			if kit {
+				return printRecoveryKit()
 			}
 			pid, _ := friends.PeerIDFromHex(hex.EncodeToString(pub))
 			fmt.Printf("Name:        %s\n", card.Nickname)
@@ -179,7 +182,51 @@ func newIDCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&cardOnly, "card", false, "print only the contact card (for scripts)")
+	cmd.Flags().BoolVar(&kit, "kit", false, "print your recovery kit: the recovery phrase and your friends' contact cards")
 	return cmd
+}
+
+// printRecoveryKit prints everything needed to recover on a new machine: the
+// recovery phrase and how to reach friends.
+func printRecoveryKit() error {
+	kr, err := unlock()
+	if err != nil {
+		return err
+	}
+	phrase, err := kr.RecoveryCode()
+	if err != nil {
+		return err
+	}
+	book, err := loadFriends()
+	if err != nil {
+		return err
+	}
+	fmt.Println("hidage recovery kit: print it or keep it offline. Anyone with the phrase can")
+	fmt.Println("decrypt all your backups. Re-print it after adding friends.")
+	fmt.Println()
+	fmt.Println("Recovery phrase:")
+	fmt.Println("  " + phrase)
+	fmt.Println()
+	list := book.List()
+	if len(list) == 0 {
+		fmt.Println("Friends: none yet. Without a friend's card, recovery needs one of their addresses.")
+	} else {
+		fmt.Println("Friends (any one is enough to start; the rest are found from your backup):")
+		for _, f := range list {
+			card := &friends.Card{PubKey: mustPub(f.PubKey), Nickname: f.Nickname}
+			for _, a := range f.Addrs {
+				if ma, err := multiaddr.NewMultiaddr(a); err == nil {
+					card.Addrs = append(card.Addrs, ma)
+				}
+			}
+			fmt.Printf("  %s:\n  %s\n", f.Nickname, card.Encode())
+		}
+	}
+	fmt.Println()
+	fmt.Println("On a new machine:")
+	fmt.Println("  hidage init --recover            (paste the phrase)")
+	fmt.Println("  hidage restore --friends --from <one friend's card above> --to ~/restored")
+	return nil
 }
 
 func newFriendCmd() *cobra.Command {
@@ -230,7 +277,7 @@ func friendInviteCmd() *cobra.Command {
 			fmt.Printf("It works once, until %s, and gives them %s here.\n", exp.Local().Format("2006-01-02 15:04"), config.FormatSize(quota))
 			fmt.Println("Anyone holding it can pair with you, so send it privately.")
 			if !running {
-				fmt.Println("Your node is not running: start `hidage serve` so the pairing can complete.")
+				fmt.Println("Your node is not running: start `hidage daemon` so the pairing can complete.")
 			}
 			return nil
 		},
@@ -321,7 +368,7 @@ func acceptInvite(book *friends.Book, f *friends.Friend, card *friends.Card) err
 			return fmt.Errorf("%s's node refused the invite (already used?); ask for a new one", f.Nickname)
 		}
 		fmt.Printf("Could not reach %s's node yet (%v).\n", f.Nickname, err)
-		fmt.Printf("Run `hidage serve`: it retries until the invite expires (%s). If the invite was\n"+
+		fmt.Printf("Run `hidage daemon`: it retries until the invite expires (%s). If the invite was\n"+
 			"already used, the retries fail too; ask %s for a new one.\n", card.Expires.Local().Format("2006-01-02 15:04"), f.Nickname)
 		return nil
 	}
