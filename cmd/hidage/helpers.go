@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -41,7 +40,7 @@ func readPassphrase(confirm bool) (string, error) {
 		return env, nil
 	}
 	if settings, _ := config.Load(); settings.PassphraseCommand != "" && !confirm {
-		out, err := exec.Command("sh", "-c", settings.PassphraseCommand).Output()
+		out, err := shellCommand(settings.PassphraseCommand).Output()
 		if err != nil {
 			return "", fmt.Errorf("passphrase_command failed: %w", err)
 		}
