@@ -57,7 +57,7 @@ func newStatusCmd() *cobra.Command {
 
 			switch st, running := runningNode(); {
 			case running && st.Locked:
-				warn("the daemon is running but locked: it hosts for friends but takes no backups (set passphrase_command)")
+				warn("the daemon is running but locked: it hosts for friends but takes no backups (run `hidage daemon --install` to save the passphrase, or set passphrase_command)")
 			case running && scheduled:
 				fmt.Printf("  daemon:        running, backs this folder up every %s\n", settings.Backup.Every)
 			case running:

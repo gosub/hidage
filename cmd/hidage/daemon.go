@@ -15,6 +15,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"hidage/internal/config"
 	"hidage/internal/friends"
@@ -35,9 +36,10 @@ func newDaemonCmd() *cobra.Command {
 with friends, and (with the keyring unlocked) snapshot and publish the folders listed
 in config.toml on schedule, renewing and auditing what friends hold.
 
-The passphrase comes from HIDAGE_PASSPHRASE, passphrase_command in config.toml, or
-the terminal. Without it the daemon still hosts for friends (using the cached
-identity key) but takes no backups.`,
+The passphrase comes from HIDAGE_PASSPHRASE, passphrase_command in config.toml, the
+OS password store (where --install offers to save it), or the terminal. Without it
+the daemon still hosts for friends (using the cached identity key) but takes no
+backups.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if install {
@@ -149,7 +151,7 @@ identity key) but takes no backups.`,
 			fmt.Println("Friends add you with the card from `hidage id --card`.")
 			switch n := len(settings.Backup.Folders); {
 			case kr == nil:
-				fmt.Println("Keyring locked: hosting for friends only, no backups (set passphrase_command).")
+				fmt.Println("Keyring locked: hosting for friends only, no backups (run `hidage daemon --install` to save the passphrase).")
 			case n == 0:
 				fmt.Println("No folders to back up yet (add them to `folders` in config.toml).")
 			default:
@@ -176,21 +178,21 @@ func daemonKeys() (*keyring.Keyring, identity.Identity, error) {
 	if !keyring.Exists(paths.KeyringPath) {
 		return nil, identity.Identity{}, fmt.Errorf("no keyring found; run `hidage init` (or `hidage init --recover`) first")
 	}
-	pass, perr := readPassphrase(false)
+	kr, perr := unlockKeyring(paths.KeyringPath)
 	if perr == nil {
-		kr, err := keyring.Load(paths.KeyringPath, pass)
-		if err != nil {
-			return nil, identity.Identity{}, err
-		}
 		if err := kr.SaveIdentity(paths.IdentityPath); err != nil {
 			return nil, identity.Identity{}, err
 		}
 		return kr, kr.Identity(), nil
 	}
+	if !errors.As(perr, new(errNoPassphrase)) {
+		return nil, identity.Identity{}, perr // a wrong passphrase, not a missing one
+	}
 	id, err := keyring.LoadIdentity(paths.IdentityPath)
 	if err != nil {
 		return nil, identity.Identity{}, fmt.Errorf("cannot unlock the keyring (%v), and no cached identity yet: "+
-			"set passphrase_command in config.toml, or run `hidage daemon` once from a terminal", perr)
+			"run `hidage daemon --install` from a terminal to save the passphrase, set passphrase_command "+
+			"in config.toml, or run `hidage daemon` once from a terminal", perr)
 	}
 	return nil, id, nil
 }
@@ -322,10 +324,8 @@ func installService() error {
 	if err != nil {
 		return err
 	}
-	settings, _ := config.Load()
-	if settings.PassphraseCommand == "" {
-		fmt.Println("Note: passphrase_command is not set in config.toml, so after a reboot the service")
-		fmt.Println("hosts for friends but takes no backups until you set it.")
+	if err := offerToSavePassphrase(); err != nil {
+		return err
 	}
 	switch runtime.GOOS {
 	case "linux":
@@ -386,4 +386,49 @@ func writeNew(p, content string) error {
 		return err
 	}
 	return os.WriteFile(p, []byte(content), 0o644)
+}
+
+// offerToSavePassphrase asks, when run from a terminal, whether to save the
+// keyring passphrase in the OS password store so the installed daemon can take
+// backups unattended. Without it (and without passphrase_command) the daemon
+// only hosts for friends after a reboot, and the user is told so.
+func offerToSavePassphrase() error {
+	settings, _ := config.Load()
+	if settings.PassphraseCommand != "" {
+		return nil
+	}
+	if _, ok := savedPassphrase(); ok {
+		fmt.Printf("Your passphrase is saved in %s: the daemon takes backups unattended.\n", secretStoreName())
+		return nil
+	}
+	locked := func() {
+		fmt.Println("Note: without a saved passphrase or passphrase_command in config.toml, the")
+		fmt.Println("daemon hosts for friends after a reboot but takes no backups.")
+	}
+	if !secretStoreAvailable() || !term.IsTerminal(int(os.Stdin.Fd())) {
+		locked()
+		return nil
+	}
+	fmt.Printf("Save your passphrase in %s, so the daemon can back up\nunattended? [Y/n] ", secretStoreName())
+	answer, _ := readLine()
+	if a := strings.ToLower(strings.TrimSpace(answer)); a != "" && a != "y" && a != "yes" {
+		locked()
+		return nil
+	}
+	paths, err := config.Resolve()
+	if err != nil {
+		return err
+	}
+	pass, _, err := lookupPassphrase(false, false)
+	if err != nil {
+		return err
+	}
+	if _, err := keyring.Load(paths.KeyringPath, pass); err != nil {
+		return err
+	}
+	if err := savePassphrase(pass); err != nil {
+		return fmt.Errorf("save the passphrase in %s: %w", secretStoreName(), err)
+	}
+	fmt.Printf("Saved. To remove it later, delete the %q entry in %s.\n", secretService, secretStoreName())
+	return nil
 }

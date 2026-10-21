@@ -107,8 +107,8 @@ type Settings struct {
 	Listen []string `toml:"listen"`
 	// Reachability is "auto", "public" or "private" (see p2p.Reachability).
 	Reachability string `toml:"reachability"`
-	// PassphraseCommand, if set, is run (via sh -c) to obtain the keyring
-	// passphrase on stdout, e.g. for an unattended daemon.
+	// PassphraseCommand, if set, is run (via sh -c, or cmd /C on Windows) to
+	// obtain the keyring passphrase on stdout, e.g. for an unattended daemon.
 	PassphraseCommand string    `toml:"passphrase_command"`
 	Hosting           Hosting   `toml:"hosting"`
 	Backup            Backup    `toml:"backup"`
@@ -293,8 +293,10 @@ listen = [%s]
 reachability = %q
 
 # Command printing the keyring passphrase, so "hidage daemon" can take backups
-# unattended, e.g. "systemd-creds decrypt ~/.config/hidage/pass.cred -" or
-# "pass show hidage". Empty: ask on the terminal (or use HIDAGE_PASSPHRASE).
+# unattended, e.g. "pass show hidage" (run with sh -c, or cmd /C on Windows).
+# Usually not needed: "hidage daemon --install" offers to save the passphrase
+# in the OS password store instead. Empty: use the password store if it holds
+# the passphrase, else ask on the terminal (or use HIDAGE_PASSPHRASE).
 passphrase_command = ""
 
 [hosting]
