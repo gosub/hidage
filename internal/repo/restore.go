@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -22,47 +23,68 @@ func (r *Repo) Restore(snap *Snapshot, outDir string) error {
 // streamed chunk by chunk, so memory stays bounded; path-traversal entry names
 // are rejected.
 func RestoreWith(l *dag.Loader, snap *Snapshot, outDir string) error {
+	return (&Restorer{Loader: l}).All(snap, outDir)
+}
+
+// Restorer restores snapshots and records the entries it had to rename (see
+// Renamed), so the caller can report them.
+type Restorer struct {
+	Loader  *dag.Loader
+	Renamed []Renamed
+}
+
+// All restores the whole snapshot under outDir, like RestoreWith.
+func (r *Restorer) All(snap *Snapshot, outDir string) error {
 	if err := snap.Verify(); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("create out dir: %w", err)
 	}
-	root, err := l.Tree(snap.Root)
+	root, err := r.Loader.Tree(snap.Root)
 	if err != nil {
 		return err
 	}
+	names := dirNames{}
 	for _, e := range root.Entries {
-		if err := materialize(l, e, outDir); err != nil {
+		if err := r.materialize(e, outDir, "", names); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func materialize(l *dag.Loader, e dag.Entry, parentDir string) error {
-	target, err := safeJoin(parentDir, e.Name)
+// materialize restores entry e into parentDir. from is the snapshot path of
+// parentDir and names the names already used in it.
+func (r *Restorer) materialize(e dag.Entry, parentDir, from string, names dirNames) error {
+	name := names.claim(e.Name)
+	target, err := safeJoin(parentDir, name)
 	if err != nil {
 		return err
+	}
+	from = path.Join(from, e.Name)
+	if name != e.Name {
+		r.Renamed = append(r.Renamed, Renamed{From: from, To: target})
 	}
 	switch e.Kind {
 	case dag.KindTree:
 		if err := os.MkdirAll(target, fs.FileMode(e.Mode)|0o700); err != nil {
 			return fmt.Errorf("mkdir %s: %w", target, err)
 		}
-		tn, err := l.Tree(e.Ref)
+		tn, err := r.Loader.Tree(e.Ref)
 		if err != nil {
 			return err
 		}
+		children := dirNames{}
 		for _, child := range tn.Entries {
-			if err := materialize(l, child, target); err != nil {
+			if err := r.materialize(child, target, from, children); err != nil {
 				return err
 			}
 		}
 		// Set the directory mtime last: writing children would otherwise bump it.
 		restoreModTime(target, e.ModTime)
 	case dag.KindFile:
-		fn, err := l.File(e.Ref)
+		fn, err := r.Loader.File(e.Ref)
 		if err != nil {
 			return err
 		}
@@ -74,7 +96,7 @@ func materialize(l *dag.Loader, e dag.Entry, parentDir string) error {
 			return fmt.Errorf("create %s: %w", target, err)
 		}
 		for _, cref := range fn.Chunks {
-			data, err := l.Chunk(cref)
+			data, err := r.Loader.Chunk(cref)
 			if err != nil {
 				out.Close()
 				return err
@@ -119,20 +141,26 @@ func safeJoin(dir, name string) (string, error) {
 // its own base name). path is relative to the snapshot's folder, with "/"
 // separators; "" or "." restores the whole snapshot like RestoreWith.
 func RestorePath(l *dag.Loader, snap *Snapshot, path, outDir string) error {
-	if cleanPath(path) == "" {
-		return RestoreWith(l, snap, outDir)
+	return (&Restorer{Loader: l}).Path(snap, path, outDir)
+}
+
+// Path restores one file or directory of a snapshot into outDir, like
+// RestorePath.
+func (r *Restorer) Path(snap *Snapshot, p, outDir string) error {
+	if cleanPath(p) == "" {
+		return r.All(snap, outDir)
 	}
 	if err := snap.Verify(); err != nil {
 		return err
 	}
-	e, err := findEntry(l, snap, path)
+	e, err := findEntry(r.Loader, snap, p)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("create out dir: %w", err)
 	}
-	return materialize(l, e, outDir)
+	return r.materialize(e, outDir, path.Dir(cleanPath(p)), dirNames{})
 }
 
 // List returns the entries of a directory in a snapshot (path relative to the

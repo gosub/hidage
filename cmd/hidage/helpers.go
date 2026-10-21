@@ -153,3 +153,16 @@ func hasPublicInterface() bool {
 	}
 	return false
 }
+
+// printRenamed lists the files a restore put under a different name because
+// this OS can't hold the original one, or because it differed from another
+// only by case.
+func printRenamed(renamed []repo.Renamed) {
+	if len(renamed) == 0 {
+		return
+	}
+	fmt.Printf("%d name(s) can't be used here as they are, so they were restored as:\n", len(renamed))
+	for _, r := range renamed {
+		fmt.Printf("  %s -> %s\n", r.From, r.To)
+	}
+}

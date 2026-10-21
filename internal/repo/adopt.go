@@ -136,7 +136,7 @@ func RootName(l *dag.Loader, snap *Snapshot) (string, error) {
 	if len(root.Entries) != 1 {
 		return "", fmt.Errorf("snapshot root has %d entries, want 1", len(root.Entries))
 	}
-	return root.Entries[0].Name, nil
+	return portableName(root.Entries[0].Name), nil
 }
 
 type getterFunc func(id string) ([]byte, error)

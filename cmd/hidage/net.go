@@ -375,9 +375,11 @@ func restoreRelease(ns *netstore.Store, cache *store.KeyedStore, masterKey []byt
 		return "", err
 	}
 	l := dag.NewLoader(cache, cache, masterKey)
-	if err := repo.RestoreWith(l, snap, outDir); err != nil {
+	rs := &repo.Restorer{Loader: l}
+	if err := rs.All(snap, outDir); err != nil {
 		return "", err
 	}
+	printRenamed(rs.Renamed)
 	name, err := repo.RootName(l, snap)
 	if err != nil {
 		return outDir, nil

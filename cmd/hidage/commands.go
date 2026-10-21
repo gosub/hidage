@@ -206,9 +206,11 @@ Snapshot ids may be shortened to any unambiguous prefix.`,
 			if _, err := os.Stat(dest); err == nil && !force {
 				return fmt.Errorf("%s already exists; restore somewhere else or pass --force to overwrite", dest)
 			}
-			if err := repo.RestorePath(l, snap, path, to); err != nil {
+			rs := &repo.Restorer{Loader: l}
+			if err := rs.Path(snap, path, to); err != nil {
 				return err
 			}
+			defer printRenamed(rs.Renamed)
 			if path == "" {
 				fmt.Printf("Restored snapshot %s into %s\n", snap.ID[:12], dest)
 			} else {
