@@ -176,7 +176,7 @@ so cost is proportional to the change, not the tree size. It reports each path a
 added / removed / modified.
 
 ### Prune / GC (`Repo.Forget`, `Repo.Prune`)
-`forget` deletes a snapshot's root record. `prune` then mark-sweeps **both stores**: it
+`Repo.Forget` deletes a snapshot's root record; `Repo.Prune` (run by `hidage forget` right after) mark-sweeps **both stores**: it
 computes the set of `CipherID`s reachable from *every surviving snapshot in this repository*
 (root → trees → files → chunks) and deletes any object — meta node or data ref — not in
 that set. Objects shared with a surviving snapshot are retained, so pruning one version
