@@ -27,6 +27,9 @@ type HardlinkStore struct {
 
 // NewHardlinkStore opens a store under root for namespace (the repository ID).
 func NewHardlinkStore(root, namespace string) (*HardlinkStore, error) {
+	if err := fsx.MkdirPrivate(root); err != nil {
+		return nil, fmt.Errorf("create %s: %w", root, err)
+	}
 	s := &HardlinkStore{
 		pool: filepath.Join(root, "pool"),
 		refs: filepath.Join(root, "refs", namespace),

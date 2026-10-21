@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"hidage/internal/fsx"
 )
 
 // AppName is the directory name used under the user's config and data roots.
@@ -78,10 +80,20 @@ func Ensure() (Paths, error) {
 	if err != nil {
 		return Paths{}, err
 	}
-	if err := os.MkdirAll(p.Dir, 0o700); err != nil {
+	if err := fsx.MkdirPrivate(p.Dir); err != nil {
 		return Paths{}, fmt.Errorf("create config dir: %w", err)
 	}
 	return p, nil
+}
+
+// EnsureDataStore creates the data store directory, private to the current
+// user, and returns its path.
+func EnsureDataStore() (string, error) {
+	dir := DataStoreDir()
+	if err := fsx.MkdirPrivate(dir); err != nil {
+		return "", fmt.Errorf("create data store: %w", err)
+	}
+	return dir, nil
 }
 
 // Settings is the content of config.toml. Every field has a default, so a

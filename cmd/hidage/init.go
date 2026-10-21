@@ -71,8 +71,12 @@ instead, e.g. on a new machine; then "hidage restore --friends --from <a friend'
 				}
 				fmt.Printf("Initialized hidage at %s\n", paths.Dir)
 			}
+			storeDir, err := config.EnsureDataStore()
+			if err != nil {
+				return err
+			}
 			fmt.Printf("Public key: %x\n", kr.Identity().Public)
-			fmt.Printf("Data store: %s\n", config.DataStoreDir())
+			fmt.Printf("Data store: %s\n", storeDir)
 			fmt.Println()
 			if recover {
 				fmt.Println("Next: hidage restore --friends --from <a friend's contact card> --to <dir>")
