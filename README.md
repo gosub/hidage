@@ -1,9 +1,10 @@
 # hidage — hidden storage
 
-`hidage` is a peer-to-peer, pseudonymous, distributed backup system. The goal: back up a
-file or folder by spreading **encrypted, erasure-coded shards** across a P2P network
-instead of a central server: you store your friends' backups, they store yours, each
-within the space you give each other, and audits check that they still hold it.
+`hidage` is backup **with your friends**: your folders are encrypted, versioned and
+erasure-coded, and the pieces are spread across your friends' machines instead of a
+cloud service. You store their backups, they store yours, each within the space you give
+each other, and audits check that they still hold it. Lose your laptop, and the 24-word
+recovery phrase plus one friend's contact card get everything back.
 
 > **Status: networked + redundant.** The encrypted **versioned storage core**
 > (content-addressed repository with incremental snapshots, history, diff, prune)
@@ -37,8 +38,8 @@ files ─FastCDC chunk─▶ chunks ─encrypt─▶ Merkle DAG (file + tree nod
    re-stored.
 4. **Snapshot** — an Ed25519-signed root chained to its parent. Re-snapshotting an
    unchanged tree stores **nothing**; changing one file stores only its new chunks plus
-   the tree nodes on the path to the root. Old snapshots stay restorable until you forget
-   and prune them (or use `snapshot --replace` to supersede the previous one in one step).
+   the tree nodes on the path to the root. Old snapshots stay restorable until you
+   `forget` them (or use `backup --replace` to supersede the previous one in one step).
 
 **Where things live:**
 
@@ -59,100 +60,89 @@ files ─FastCDC chunk─▶ chunks ─encrypt─▶ Merkle DAG (file + tree nod
 go build -o hidage ./cmd/hidage
 ```
 
-## Usage
+## Getting started
 
 ```sh
-hidage init                       # one-time: create the keyring (master key + identity)
-hidage recovery-code              # print the 24-word phrase — WRITE IT DOWN
+hidage init                       # once per machine: keyring, config.toml, data store
+hidage id --kit                   # print your recovery kit; keep it offline
 
-hidage snapshot ./project         # snapshot a folder (creates ./project/.hidage on first use)
-hidage snapshot --replace ./project   # … superseding the previous snapshot (no history kept)
-cd project && hidage snapshots    # run inside a tracked folder; commands discover .hidage
-hidage status                     # is this backup protected? snapshot age, published?, peers,
-                                  #   fault tolerance, failing audits (non-zero exit if degraded)
-hidage diff <idA> <idB>           # paths added / removed / modified between snapshots
-hidage restore <id> ./out         # materialize a version into ./out
-hidage forget <id>                # drop a snapshot record …
-hidage prune                      # … then GC objects no snapshot references
-
-hidage recover                    # on a new machine: rebuild the keyring from the phrase
-
-hidage id                         # your key, addresses and contact card (no passphrase needed)
-hidage friend invite              # print a single-use invite (valid 24h)
-hidage friend add <invite>        # accept it: you become friends both ways
-hidage friend add <card>          # or add a contact card (they must add yours too)
-hidage friend set bob --give 200GiB   # change a friend's nickname or the space you give them
-hidage friend ls                  # list friends; `friend rm <name>` removes one
-
-# networking
-hidage daemon                     # run the node: back up `folders` from config.toml on
-                                  #   schedule (snapshot, publish, renew, audit) and host
-                                  #   for friends; `daemon --install` adds a user service
-                                  #   (systemd/launchd). Serve objects, accept pushes from friends
-                                  #   only (connections from anyone else are refused),
-                                  #   within the space you give each; replaced data is kept in
-                                  #   trash for a while, unrenewed backups expire
-hidage publish                    # erasure-code the latest snapshot and spread the shards
-                                  #   across every reachable friend (--redundancy, --min-peers
-                                  #   default to config.toml)
-hidage publish --peer <addr>      # …or push to a named peer instead
-hidage net-list                   # list all folders you've published
-hidage net-restore ./out --all    # recover from your friends: resolve the account,
-                                  #   gather K-of-M shards, rebuild, restore (--repo <name>
-                                  #   for one; on a fresh machine add --from <friend's card>)
-
-# audits
-hidage audit                      # challenge the friends holding this repo's shards to
-                                  #   prove they still have them (results in status, friend ls)
+hidage friend invite              # send the printed invite to a friend, privately;
+                                  #   they run `hidage friend add <invite>` and you are
+                                  #   friends both ways (they need a running daemon too)
+hidage backup ~/Documents         # snapshot and send to your friends; the folder is added
+                                  #   to the ones the daemon keeps backed up
+hidage daemon --install           # run the daemon at login (systemd/launchd), then set
+                                  #   passphrase_command in config.toml for unattended backups
 ```
 
-- A tracked folder is one containing `.hidage/`; `snapshot` creates it on first use.
-  Other commands **discover it by walking up from the current directory** (git-style),
-  or pass `-C <dir>` to start elsewhere.
+## The nine commands
+
+```sh
+hidage init [--recover]           # set up this machine; --recover: from your phrase (stdin)
+hidage id [--card | --kit]        # your key, addresses and contact card (no passphrase);
+                                  #   --kit adds the recovery phrase and friends' cards
+hidage friend invite              # single-use invite, valid 24h (--give, --name, --valid)
+hidage friend add <invite|card>   # accept an invite (mutual) or add a contact card
+hidage friend set bob --give 200GiB   # change a nickname or the space you give
+hidage friend ls [-v]             # space both ways, last audit, last seen
+hidage friend rm bob [--purge]    # remove (and delete what you hold for them)
+
+hidage backup [folder]            # snapshot + send what changed to every reachable friend
+                                  #   (--local: snapshot only; --once: don't schedule it)
+hidage restore --to ~/out         # the latest snapshot of this folder
+hidage restore 3f2a sub/x.txt --to .   # one file of an older snapshot
+hidage restore --list [snap] [path]    # browse a snapshot
+hidage restore --friends --to ~/out    # from your friends (new machine: --from <card>)
+hidage log                        # history, newest first, marking what friends hold
+hidage log --diff a,b             # what changed between two snapshots
+hidage log --friends              # every backup your friends hold for you
+hidage forget <snap>...           # drop snapshots and free the space only they used
+hidage status [--audit]           # is this folder protected? freshness, friends' health,
+                                  #   fault tolerance, lease; non-zero exit when degraded
+hidage daemon [--install]         # scheduled backups + host and relay for friends
+```
+
+- Commands run inside a backed-up folder **discover its `.hidage/`** by walking up from
+  the current directory (git-style), or pass `-C <dir>`. Snapshot ids may be shortened to
+  any unambiguous prefix, and `latest` names the newest.
+- **Settings** live in `~/.config/hidage/config.toml`, written with comments by `init`:
+  the folders the daemon backs up and how often, redundancy, the space you give friends
+  by default, how long friends' data is kept, network addresses and reachability.
 - The **bulk chunk store** defaults to `~/.local/share/hidage/store` (an existing
-  `/opt/hidage/store` is still used); set `store` in `config.toml` or the `HIDAGE_STORE` env
-  var to put it elsewhere, on a roomy disk excluded from your backups.
-- **Settings** live in `~/.config/hidage/config.toml`; `daemon` and `publish` take their
-  listen address, lease, redundancy and minimum peer count from it unless a flag overrides.
-- For unattended backups set `passphrase_command` (e.g. `systemd-creds`, `pass`). Without
-  it, a daemon started at boot runs **locked**: it hosts and relays for friends from a
-  cached identity key (`identity.key`, which can't decrypt backups) but takes no backups,
-  and `status` says so.
-- Snapshot IDs may be given as any unambiguous **prefix**.
-- The passphrase (set at `init`) is read interactively; for scripting/tests set
-  `HIDAGE_PASSPHRASE`.
-- **Recovery:** `recovery-code` prints a 24-word BIP39 phrase encoding the root secret
-  (master key + identity). Keep it offline — anyone with it can decrypt your backups, and
-  it's the only way to get your key back if you lose this machine. `hidage recover` reads
-  the phrase from stdin and rebuilds the keyring (under a new passphrase). With the phrase
-  plus one friend's contact card (`--from`), `hidage net-restore` rebuilds the files from
-  your friends — no local `.hidage` or chunk store needed. It also restores your friend list
-  (kept encrypted in your backup) and makes each folder its repository again, so `hidage
-  publish` resumes where you left off.
+  `/opt/hidage/store` is still used); set `store` in `config.toml` or `HIDAGE_STORE` to
+  put it on a roomy disk excluded from your backups.
+- The **passphrase** comes from `HIDAGE_PASSPHRASE`, then `passphrase_command` (e.g.
+  `systemd-creds`, `pass`), then the terminal. A daemon started with none of these runs
+  **locked**: it hosts and relays for friends from a cached identity key (`identity.key`,
+  which can't decrypt backups) but takes no backups, and `status` says so.
+- **Recovery:** `id --kit` prints the 24-word phrase (your root secret: anyone with it can
+  decrypt your backups) and your friends' cards. On a new machine, `init --recover` and
+  `restore --friends --from <one card>` bring back your files, your friend list (kept
+  encrypted in your backup) and each folder as a repository, so `backup` resumes where you
+  left off and only renews what friends already hold.
 
 ## End-to-end demo
 
-Incremental snapshots in action — a one-byte change re-stores almost nothing:
+Incremental snapshots in action, on one machine — a one-byte change re-stores almost
+nothing:
 
 ```sh
 go build -o hidage ./cmd/hidage
 export HIDAGE_PASSPHRASE='correct horse battery staple'
-export HIDAGE_STORE="$PWD/.hidage-data"        # a writable chunk store for the demo
 
 hidage init
 mkdir -p project
 echo hello > project/a.txt
 head -c 3000000 /dev/urandom > project/big.bin  # a large, unchanging file
-hidage snapshot ./project                        # snapshot 1 (creates ./project/.hidage)
+hidage backup --local project                    # snapshot 1 (creates project/.hidage)
 
 echo goodbye > project/a.txt                     # edit one small file
 cd project
-hidage snapshot                                  # snapshot 2 (discovers .hidage); stores only the delta
+hidage backup --local                            # snapshot 2: stores only the delta
 
-hidage snapshots
-A=$(hidage snapshots | awk 'NR==2{print $1}')
-hidage diff "$A" "$(hidage snapshots | awk 'NR==3{print $1}')"   # ~ project/a.txt
-hidage restore "$A" /tmp/out                      # older version restores intact
+hidage log
+hidage log --diff "$(hidage log | awk 'NR==2{print $1}')","$(hidage log | awk 'NR==1{print $1}')"   # ~ project/a.txt
+hidage restore "$(hidage log | awk 'NR==2{print $1}')" --to /tmp/out   # the older version
 diff /tmp/out/project/big.bin big.bin && echo "big.bin restored identically"
 ```
 
@@ -185,7 +175,7 @@ peers, one killed, full byte-identical recovery from the survivors).
 
 | Path | Responsibility |
 |---|---|
-| `cmd/hidage` | CLI: snapshot/restore/diff/prune, recovery-code/recover, id/friend, daemon/publish/net-restore/net-list, audit, status |
+| `cmd/hidage` | CLI: init, id, friend, backup, restore, log, forget, status, daemon |
 | `internal/config` | `config.toml` settings, config + data-store path resolution (`HIDAGE_STORE`) |
 | `internal/keyring` | root secret (wrapped under passphrase) → master key + identity; BIP39 recovery code |
 | `internal/identity` | Ed25519 keypair derived from the keyring (libp2p peer key) |
@@ -209,7 +199,7 @@ peers, one killed, full byte-identical recovery from the survivors).
 > and trust. See [`THREAT_MODEL.md`](THREAT_MODEL.md) for the full adversarial analysis.
 
 
-- **Peer selection** — `publish` spreads to your reachable friends, or `--peer` names a
+- **Peer selection** — `backup` spreads to your reachable friends, or `--peer` names a
   host explicitly. There is no discovery of strangers' storage. Erasure coding only helps across enough distinct
   peers, so `--min-peers` guards against (and a single-peer publish warns about)
   configurations with no fault tolerance.
@@ -236,9 +226,9 @@ peers, one killed, full byte-identical recovery from the survivors).
 - **Phase 3 — networking + trust + recovery.** ✅ Done. Recovery code (`recovery-code` /
   `recover`); a friend list (`friend …`, formerly a trust whitelist); a **libp2p** node (`daemon`) keyed by the
   Ed25519 identity with object + push protocols (originally over a Kademlia DHT, since
-  removed in favour of talking to friends directly); `publish`
+  removed in favour of talking to friends directly); publishing
   replicates a snapshot's objects (bytes, DAG nodes, chunks) to friends and posts a
-  **signed head pointer**; `net-restore` rebuilds a backup from the network with only the
+  **signed head pointer**; restoring from friends rebuilds a backup from the network with only the
   recovery phrase + one friend's contact card.
 - **Phase 4 — audits + redundancy.** ✅ Done. Proof-of-storage **audits** (challenge a
   peer to prove it still holds a shard, signed receipt), originally feeding reputation

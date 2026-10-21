@@ -78,7 +78,8 @@ implemented.
 A friend can accept your shards then delete them. Audits catch this: a failed audit
 is recorded against the friend and `status` flags it (and whether the backup is still
 rebuildable); the response is social, plus re-publishing. The catch is that
-detection is **only as frequent as you run `hidage audit`** — between audits, your
+detection is **only as frequent as audits run** (`audit_every` in the daemon, or
+`hidage status --audit`) — between audits, your
 redundancy can silently degrade. Mitigate by auditing on a schedule and publishing
 at `--redundancy` high enough to tolerate some silent loss.
 

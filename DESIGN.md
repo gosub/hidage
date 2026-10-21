@@ -27,8 +27,8 @@ Everything derives from one secret:
   public key is the node's pseudonymous identity (and future libp2p peer key); the private
   key signs snapshots. It is *derived*, not stored separately.
 - **Recovery code** — the root encodes to a 24-word **BIP39** mnemonic (`hidage
-  recovery-code`). Because both the master key and the identity derive from the root, this
-  single phrase backs up the entire node's secrets; `hidage recover` rebuilds the keyring
+  id --kit`). Because both the master key and the identity derive from the root, this
+  single phrase backs up the entire node's secrets; `hidage init --recover` rebuilds the keyring
   from it on a fresh machine (under a new passphrase).
 
 ### Content-addressed stores (`internal/store`)
@@ -71,7 +71,7 @@ it):
 `Init` writes `.hidage/` and its marker config; `Open` reads it. Both take the user
 master key (loaded once via `internal/keyring`) and the data-store path. `Find` locates a
 repository by walking up from the current directory, so commands work git-style from
-anywhere inside a tracked folder; `snapshot` auto-creates `.hidage/` on first use. The
+anywhere inside a tracked folder; `backup` auto-creates `.hidage/` on first use. The
 data store path comes from `$HIDAGE_STORE`, else `store` in `config.toml`, else an existing
 legacy `/opt/hidage/store`, else `$XDG_DATA_HOME/hidage/store`; a
 permission failure there yields actionable setup guidance.
@@ -197,7 +197,7 @@ per friend, the Ed25519 public key, a local nickname, the last known addresses, 
 this node gives them, and when it last saw them. hidage is friends-only, so this list is
 the whole trust model: `daemon` refuses inbound connections from any other key (a libp2p
 connection gater checked once the remote is authenticated) and accepts pushes only from
-friends, and `publish` pushes to friends.
+friends, and `backup` publishes to friends.
 
 Friends are added from a **contact card**, `hidage1:` + base32 of a compact binary payload
 (public key, suggested nickname, multiaddrs) with a 4-byte SHA-256 checksum so a damaged
@@ -262,7 +262,7 @@ backup — it names an **account manifest** (`internal/account`): a small object
 entry per repository (`repoID`, name, current Release id). It needs no signature of its
 own — the signed head endorses its content address, and the fetcher verifies that address.
 
-`publish` gathers a snapshot's object closure (`repo.PublishSet`: snapshot bytes + every
+Publishing (`backup`, or the daemon) gathers a snapshot's object closure (`repo.PublishSet`: snapshot bytes + every
 reachable DAG node + chunk), **erasure-codes** it (below), and spreads the resulting shards
 round-robin across every reachable friend (dialed at stored addresses, then at addresses
 learned from other friends), or the explicit `--peer` multiaddrs instead. Since the coding only helps across
@@ -271,11 +271,11 @@ configurations. It then fetches the current account manifest,
 upserts this repo's
 entry (replacing it by `repoID`, never clobbering siblings), pushes the new Release + the
 new manifest to every peer, and hands every friend reached a new signed head naming the
-manifest. `net-restore` resolves the
+manifest. `restore --friends` resolves the
 head → fetches + verifies the manifest → selects a backup (`--repo <name>` / `--all` / the
 sole entry) → fetches that Release, gathers K-of-M shards per pack from whoever still has
 them, rebuilds the objects, and runs the ordinary restore walk against a local cache.
-(`net-list` just prints the manifest.) On a machine with no friend list yet, `--from
+(`log --friends` just prints the manifest.) On a machine with no friend list yet, `--from
 <contact card | multiaddr>` names a friend to recover from.
 
 ---
@@ -321,8 +321,8 @@ These keep distributed data recoverable and make problems visible.
   the original challenges a peer with a shard id + fresh random nonce; the peer must return
   `SHA-256(nonce || shardBytes)` (only computable with the bytes), signed by its identity,
   within a short response **deadline** (a soft defense against fetching the shard from
-  elsewhere on demand). The challenger verifies the proof and signature. `publish` records
-  which shards went to which peer (`.hidage/distribution.json`); `audit` regenerates the
+  elsewhere on demand). The challenger verifies the proof and signature. Publishing records
+  which shards went to which peer (`.hidage/distribution.json`); auditing regenerates the
   published release deterministically and samples each friend's assigned shards. The
   outcome is kept per friend in `friends.json` and shown by `status` and `friend ls`.
 
@@ -391,16 +391,16 @@ The three things this needs — all now in place:
 
 1. **Distribute snapshots and DAG nodes, not just chunks.** ✅ `repo.PublishSet` gathers a
    snapshot's whole closure — the signed snapshot bytes, every reachable DAG node, and
-   every chunk — and `publish` replicates all of it, so the recipe travels with the data
+   every chunk — and publishing replicates all of it, so the recipe travels with the data
    rather than dying with the original `.hidage`.
 
 2. **Make the keys recoverable.** ✅ Both the master key and the identity derive from a
-   single 32-byte root, exportable as a 24-word BIP39 phrase (`recovery-code`) and
+   single 32-byte root, exportable as a 24-word BIP39 phrase (`id --kit`) and
    restorable with `recover`.
 
 3. **Find all backups with zero local state.** ✅ A **signed head pointer**
    (`account-manifest id`, signed by the identity key), handed to every friend on
-   `publish` and returned only to the owner's key. Recovery needs only the identity (from the recovery
+   publish and returned only to the owner's key. Recovery needs only the identity (from the recovery
    code) to locate the head, and the manifest enumerates every repository — no snapshot or
    repo id to remember.
 
@@ -415,7 +415,7 @@ hold. `--files-only` restores files without adopting.
 **Minimal recovery seed.** Recovering an arbitrarily large dataset needs only a tiny
 off-machine secret plus a way onto the network: the **24-word recovery phrase** (which
 reproduces both the master key and the identity) and one **friend's contact card**
-(`--from`). From there `net-restore` does: identity → ask friends for the head → fetch +
+(`--from`). From there `restore --friends` does: identity → ask friends for the head → fetch +
 verify the manifest and release → gather K-of-M shards from friends → reassemble → walk
 the DAG, decrypting nodes and chunks.
 
