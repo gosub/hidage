@@ -35,12 +35,35 @@ How it compares:
 
 ## Install
 
-hidage needs Go 1.26 and runs on Linux and macOS (Windows is untested).
+hidage runs on Linux and macOS, on x86-64 (amd64) and ARM (arm64). Windows is not
+supported yet.
+
+Download the binary for your system from the
+[releases page](https://github.com/gosub/hidage/releases), check it against
+`SHA256SUMS`, and put it on your `PATH`:
 
 ```sh
-git clone <this repository> && cd hidage
-go install ./cmd/hidage          # or: go build -o hidage ./cmd/hidage
+curl -LO https://github.com/gosub/hidage/releases/latest/download/hidage-linux-amd64
+chmod +x hidage-linux-amd64
+mv hidage-linux-amd64 ~/.local/bin/hidage
+hidage --version
 ```
+
+The binaries are `hidage-linux-amd64`, `hidage-linux-arm64`, `hidage-darwin-amd64`
+(Intel Mac) and `hidage-darwin-arm64` (Apple silicon). On macOS, a binary downloaded
+with a browser is quarantined; clear it with `xattr -d com.apple.quarantine hidage`.
+
+## Compile from source
+
+You need Go 1.26 or newer:
+
+```sh
+git clone https://github.com/gosub/hidage.git && cd hidage
+go install ./cmd/hidage          # into $(go env GOPATH)/bin; or: go build ./cmd/hidage
+```
+
+Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml)
+whenever a `vX.Y.Z` tag is pushed.
 
 ## Quick start
 
