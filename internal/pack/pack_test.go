@@ -209,7 +209,6 @@ func groupKeys(groups [][]string) map[string]bool {
 	return m
 }
 
-
 // A new snapshot changes a few small metadata objects (scattered across the id
 // space) plus some data; the data packs it doesn't touch must stay the same.
 func TestMetadataChurnStaysInSmallPacks(t *testing.T) {
