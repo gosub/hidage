@@ -232,7 +232,8 @@ The settings folder and the store are readable only by you.
 ## Try it on one machine
 
 Three people on one computer: Bob keeps a backup for Alice, then Alice recovers it on
-a "new laptop" with only her recovery phrase and Bob's card.
+a "new laptop" with only her recovery phrase and Bob's card. The script is for a Unix
+shell (Linux or macOS).
 
 ```sh
 export HIDAGE_PASSPHRASE='correct horse battery staple'

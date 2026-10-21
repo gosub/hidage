@@ -1,6 +1,13 @@
 # Design note: Windows support
 
-**Status:** approved 2026-10-21, target v0.2.0.
+**Status:** implemented for v0.2.0 (2026-10-21), untested on real Windows machines.
+Deviations from the text below: `restore` escapes reserved names everywhere it writes
+one, including the snapshot's top folder; macOS iCloud Drive placeholders are skipped
+like OneDrive ones; the task definition is written to `%LocalAppData%\hidage\hidage-task.xml`
+and `daemon --install` prints the `schtasks` commands to register and start it, like it
+prints the `systemctl` and `launchctl` ones. CI on Windows also found that directory
+listings on NTFS report stale times, so the backup walk now reads each entry with
+`Lstat`.
 **Scope:** Windows 10 and 11 on amd64 and arm64. The storage format and the network
 protocols are unchanged; a backup made on one OS restores on the others.
 
