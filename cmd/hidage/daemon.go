@@ -233,6 +233,10 @@ func scheduledBackup(ctx context.Context, node *p2p.Node, kr *keyring.Keyring, b
 		fmt.Fprintf(out, "snapshot failed: %v\n", err)
 		return
 	}
+	if n := len(stats.Unreadable); n > 0 {
+		fmt.Fprintf(out, "%d file(s) could not be read and are not backed up, e.g. %s (%s)\n",
+			n, stats.Unreadable[0].Path, stats.Unreadable[0].Reason)
+	}
 	if !stats.Unchanged {
 		fmt.Fprintf(out, "snapshot %s: %d new objects\n", snap.ID[:12], stats.NewObjects)
 		if _, err := applyRetention(r, retentionPolicy(settings), false, out); err != nil {

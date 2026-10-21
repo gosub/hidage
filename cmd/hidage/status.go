@@ -74,6 +74,10 @@ func newStatusCmd() *cobra.Command {
 			latest := snaps[len(snaps)-1]
 			fmt.Printf("  snapshots:     %d (latest %s, %s ago)\n",
 				len(snaps), latest.ID[:12], humanAge(time.Since(latest.CreatedAt)))
+			if n := len(r.LastUnreadable()); n > 0 {
+				fmt.Printf("  unreadable:    %d file%s left out of the last backup (`hidage backup` lists them)\n",
+					n, plural(n, "", "s"))
+			}
 
 			dist, err := readDistribution(r.HidageFile("distribution.json"))
 			if err != nil {

@@ -79,6 +79,13 @@ The folder is also added to the folders "hidage daemon" keeps backed up (unless
 					fmt.Printf("  %s\n", p)
 				}
 			}
+			if n := len(stats.Unreadable); n > 0 {
+				fmt.Printf("WARNING: %d file%s could not be read and %s not backed up:\n",
+					n, plural(n, "", "s"), plural(n, "is", "are"))
+				for _, u := range stats.Unreadable {
+					fmt.Printf("  %s (%s)\n", u.Path, u.Reason)
+				}
+			}
 			if !local && !once {
 				paths, err := config.Ensure()
 				if err != nil {
