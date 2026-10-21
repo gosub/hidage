@@ -1,6 +1,12 @@
 # Design note: friends-only hidage
 
-**Status:** proposal, for review before implementation.
+**Status:** implemented (steps 1–10, October 2026). Deviations from the text below:
+`backup` also adds the folder to the daemon's schedule (`--once` to skip); `restore --friends
+[--from card]` replaces `--from-friends [card]`; `status --audit` runs an audit on demand;
+the head record keeps its timestamp instead of gaining a `seq`; packing also separates small
+(metadata) objects from bulk chunks. Open questions 1, 3 and 4 were resolved as proposed
+(no relay cap, identity cache, one identity per device); 2 (report imbalance only) is shown
+by `friend ls`; 5 (Tor) is not done.
 **Scope:** the network, trust and CLI layers. The local storage core (`chunk`,
 `crypto`, `dag`, `repo`, `store`, `keyring`) and erasure coding (`pack`, `shard`) are
 unchanged.

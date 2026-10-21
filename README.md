@@ -115,6 +115,9 @@ hidage daemon [--install]         # scheduled backups + host and relay for frien
   `systemd-creds`, `pass`), then the terminal. A daemon started with none of these runs
   **locked**: it hosts and relays for friends from a cached identity key (`identity.key`,
   which can't decrypt backups) but takes no backups, and `status` says so.
+- **History:** `[retention]` in `config.toml` (default: the last 3 versions plus one per day
+  for a week and one per week for a month) decides which versions friends keep and which
+  the daemon keeps locally; `forget --retention` applies it now.
 - **Recovery:** `id --kit` prints the 24-word phrase (your root secret: anyone with it can
   decrypt your backups) and your friends' cards. On a new machine, `init --recover` and
   `restore --friends --from <one card>` bring back your files, your friend list (kept

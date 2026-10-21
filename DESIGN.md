@@ -327,11 +327,30 @@ These keep distributed data recoverable and make problems visible.
   outcome is kept per friend in `friends.json` and shown by `status` and `friend ls`.
 
 - **Erasure-coded redundancy** (`internal/shard`, `internal/pack`) — objects are grouped
-  into ≤8 MiB **packs**; each pack is Reed-Solomon coded (`klauspost/reedsolomon`) into M
-  shards of which **any K reconstruct** it. Shards are spread round-robin across peers, so
-  losing a minority of peers loses < M−K shards per pack and the data still recovers — at
-  a fraction of the cost of M full replicas. *(Reed-Solomon replaced an earlier fountain-
-  code library that silently returned corrupt output at some parameters.)*
+  into **packs** of 1–8 MiB; each pack is Reed-Solomon coded (`klauspost/reedsolomon`) into M
+  shards of which **any K reconstruct** it, at a fraction of the cost of M full replicas.
+  *(Reed-Solomon replaced an earlier fountain-code library that silently returned corrupt
+  output at some parameters.)*
+
+- **Stable packing** — so that a republish after a small change sends little, and versions
+  share shards: objects are packed in id order with **content-defined boundaries** (past
+  1 MiB, an object ends its pack with probability proportional to its size, so boundaries
+  fall about every 2 MiB and depend only on the object; forced at 8 MiB), and objects under
+  64 KiB (snapshots, tree and file nodes, which every snapshot changes) are packed apart
+  from bulk chunks. Changing one file then rewrites the metadata pack and the data packs
+  around its chunks, not the whole release. Shards are **placed** by rendezvous hashing per
+  pack (peers ranked by a hash of pack and peer, shards dealt in that order), so the same
+  release and friends always give the same placement, a pack spreads over as many friends
+  as possible, and losing a minority of them loses < M−K shards per pack.
+
+- **Versions with friends** — publishing sends every snapshot the `[retention]` policy keeps
+  (newest `keep_last`, plus the newest per day for `keep_daily` days and per week for
+  `keep_weekly` weeks), not just the latest. Each version's Release is cached locally
+  (`.hidage/releases/`), so older versions are listed without rebuilding and their shards
+  are rebuilt (with the redundancy recorded in the Release) only if a friend lacks one.
+  The account manifest lists them (`Entry.History`), and recovery imports them, so history
+  survives losing the machine. The daemon applies the same policy to local snapshots after
+  each new one; `forget --retention` does it by hand.
 
 ---
 
