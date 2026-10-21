@@ -348,3 +348,35 @@ func TestRestorePathAndList(t *testing.T) {
 		t.Fatalf("List sub = %d entries", len(entries))
 	}
 }
+
+func TestRetention(t *testing.T) {
+	base := time.Date(2026, 10, 21, 12, 0, 0, 0, time.Local)
+	var snaps []*Snapshot
+	add := func(id string, ago time.Duration) {
+		snaps = append(snaps, &Snapshot{ID: id, CreatedAt: base.Add(-ago)})
+	}
+	add("now", 0)
+	add("now-1h", time.Hour)
+	add("now-2h", 2*time.Hour)
+	add("yesterday", 24*time.Hour)
+	add("yesterday-early", 26*time.Hour)
+	add("3days", 72*time.Hour)
+	add("2weeks", 14*24*time.Hour)
+	add("5weeks", 35*24*time.Hour)
+
+	keep := Retention{KeepLast: 2, KeepDaily: 3, KeepWeekly: 3}.Retained(snaps)
+	want := []string{"now", "now-1h", "yesterday", "3days", "2weeks"}
+	for _, id := range want {
+		if !keep[id] {
+			t.Errorf("%s should be kept", id)
+		}
+	}
+	for _, id := range []string{"now-2h", "yesterday-early", "5weeks"} {
+		if keep[id] {
+			t.Errorf("%s should not be kept", id)
+		}
+	}
+	if k := (Retention{}).Retained(snaps); len(k) != 1 || !k["now"] {
+		t.Fatalf("zero policy keeps %v, want just the newest", k)
+	}
+}
