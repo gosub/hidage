@@ -7,7 +7,10 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
@@ -15,8 +18,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Vet
+        run: go vet ./...
+
       - name: Test
-        run: go vet ./... && go test ./...
+        run: go test ./...
 
   build:
     needs: test
@@ -36,6 +42,12 @@ jobs:
           - goos: darwin
             goarch: arm64
             asset: hidage-darwin-arm64
+          - goos: windows
+            goarch: amd64
+            asset: hidage-windows-amd64.exe
+          - goos: windows
+            goarch: arm64
+            asset: hidage-windows-arm64.exe
 
     steps:
       - uses: actions/checkout@v7
@@ -74,6 +86,11 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v3
         with:
+          generate_release_notes: true
+          body: |
+            Binaries for Linux, macOS and Windows on amd64 and arm64; check them against `SHA256SUMS`.
+
+            **The Windows binaries are untested on real machines.** They are cross-compiled and the unit tests pass on GitHub's Windows runners, but pairing, the firewall prompt, the scheduled task, the password store and a full backup and restore have not been tried on Windows yet. Reports are welcome.
           files: |
             hidage-*
             SHA256SUMS
