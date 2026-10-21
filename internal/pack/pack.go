@@ -49,6 +49,7 @@ type PackDesc struct {
 // pointed to by the head pointer.
 type Release struct {
 	SnapshotID string     `json:"snapshotID"`
+	Redundancy float64    `json:"redundancy"` // what Build was given, so it can be rebuilt identically
 	Packs      []PackDesc `json:"packs"`
 }
 
@@ -56,7 +57,7 @@ type Release struct {
 // plus every shard blob (id → bytes) to distribute. redundancy is the ratio of
 // shards to the minimum needed (e.g. 2.0 emits ~2× the shards required).
 func Build(objects map[string][]byte, redundancy float64, snapshotID string) (*Release, map[string][]byte, error) {
-	rel := &Release{SnapshotID: snapshotID}
+	rel := &Release{SnapshotID: snapshotID, Redundancy: redundancy}
 	shardBlobs := map[string][]byte{}
 
 	for _, group := range groupByContent(objects) {
