@@ -125,8 +125,19 @@ func publishRepo(ctx context.Context, node *p2p.Node, kr *keyring.Keyring, r *re
 		fmt.Fprintf(out, "Spreading across %d peers; tolerates losing up to %d.\n", len(accepted), tolerate)
 	}
 
-	common := map[string][]byte{relID: relBytes, manifestID: manifestBytes}
-	assignments := spreadShards(shardBlobs, common, len(accepted))
+	keys := make([]string, len(accepted))
+	for i, p := range accepted {
+		keys[i] = p.pubHex
+	}
+	placement := placeShards(rel, keys)
+	assignments := make([]map[string][]byte, len(accepted))
+	for i := range accepted {
+		// Every peer also gets the Release and manifest, so either can always be fetched.
+		assignments[i] = map[string][]byte{relID: relBytes, manifestID: manifestBytes}
+		for _, id := range placement[i] {
+			assignments[i][id] = shardBlobs[id]
+		}
+	}
 	dist := distribution{ReleaseID: relID, SnapshotID: snap.ID, Redundancy: redundancy, PublishedAt: time.Now().UTC(), Peers: map[string][]string{}}
 	setID := hostedSetID(kr.MasterKey(), r.RepoID())
 	var holders []peerID

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -145,21 +146,34 @@ func readDistribution(path string) (distribution, error) {
 	return d, json.Unmarshal(data, &d)
 }
 
-// spreadShards assigns shard blobs round-robin across n peers, and gives the
-// common objects (Release + account manifest) to every peer so they can always
-// be fetched.
-func spreadShards(shardBlobs, common map[string][]byte, n int) []map[string][]byte {
-	out := make([]map[string][]byte, n)
-	for i := range out {
-		out[i] = map[string][]byte{}
-		for id, data := range common {
-			out[i][id] = data
-		}
+// placeShards decides which peer (by hex key) holds which shard of a release:
+// for each pack, peers are ranked by a hash of (pack, peer) and shard i goes to
+// the i-th ranked peer, wrapping around. A pack's shards thus land on as many
+// distinct peers as possible, and the same release with the same peers always
+// lands the same way (rendezvous hashing: adding or losing a peer moves only
+// the shards it gains or held), so republishing doesn't shuffle data around.
+func placeShards(rel *pack.Release, peerKeys []string) [][]string {
+	out := make([][]string, len(peerKeys))
+	if len(peerKeys) == 0 {
+		return out
 	}
-	i := 0
-	for id, data := range shardBlobs {
-		out[i%n][id] = data
-		i++
+	for _, desc := range rel.Packs {
+		if len(desc.Shards) == 0 {
+			continue
+		}
+		packKey := desc.Shards[0].ID
+		order := make([]int, len(peerKeys))
+		score := make([]string, len(peerKeys))
+		for i, k := range peerKeys {
+			order[i] = i
+			sum := sha256.Sum256([]byte(packKey + "/" + k))
+			score[i] = hex.EncodeToString(sum[:])
+		}
+		sort.Slice(order, func(a, b int) bool { return score[order[a]] < score[order[b]] })
+		for i, ref := range desc.Shards {
+			p := order[i%len(order)]
+			out[p] = append(out[p], ref.ID)
+		}
 	}
 	return out
 }
