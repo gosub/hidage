@@ -170,3 +170,77 @@ func TestPacksStableUnderSmallChanges(t *testing.T) {
 		t.Fatalf("only %d packs; the test needs several", len(groups))
 	}
 }
+
+// The same holds with large objects (e.g. 1 MiB chunks), where few objects fit
+// in a pack.
+func TestPacksStableWithLargeObjects(t *testing.T) {
+	r := rand.New(rand.NewSource(3))
+	objs := map[string][]byte{}
+	for i := 0; i < 60; i++ {
+		b := make([]byte, 700_000+r.Intn(600_000))
+		r.Read(b)
+		objs[hashID(b)] = b
+	}
+	before := groupKeys(groupByContent(objs))
+	extra := make([]byte, 1_000_000)
+	r.Read(extra)
+	objs[hashID(extra)] = extra
+	after := groupKeys(groupByContent(objs))
+	changed := 0
+	for k := range after {
+		if !before[k] {
+			changed++
+		}
+	}
+	if changed > 2 {
+		t.Fatalf("%d of %d packs changed after adding one object (want <= 2)", changed, len(after))
+	}
+}
+
+func groupKeys(groups [][]string) map[string]bool {
+	m := map[string]bool{}
+	for _, g := range groups {
+		k := ""
+		for _, id := range g {
+			k += id
+		}
+		m[k] = true
+	}
+	return m
+}
+
+
+// A new snapshot changes a few small metadata objects (scattered across the id
+// space) plus some data; the data packs it doesn't touch must stay the same.
+func TestMetadataChurnStaysInSmallPacks(t *testing.T) {
+	r := rand.New(rand.NewSource(4))
+	objs := map[string][]byte{}
+	var big []string
+	for i := 0; i < 60; i++ {
+		b := make([]byte, 700_000+r.Intn(600_000))
+		r.Read(b)
+		objs[hashID(b)] = b
+		big = append(big, hashID(b))
+	}
+	small := func() {
+		for i := 0; i < 8; i++ {
+			b := make([]byte, 200+r.Intn(2000))
+			r.Read(b)
+			objs[hashID(b)] = b
+		}
+	}
+	small()
+	before := groupKeys(groupByContent(objs))
+	delete(objs, big[10]) // a changed file drops a chunk…
+	small()               // …and the snapshot adds new small nodes
+	after := groupKeys(groupByContent(objs))
+	changed := 0
+	for k := range after {
+		if !before[k] {
+			changed++
+		}
+	}
+	if changed > 3 {
+		t.Fatalf("%d of %d packs changed (want <= 3: the small pack and the data packs around the dropped chunk)", changed, len(after))
+	}
+}

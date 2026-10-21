@@ -20,16 +20,18 @@ import (
 )
 
 // Pack sizes: a pack closes at a content-defined boundary once it holds at
-// least MinPackSize, and is forced closed at MaxPackSize (so each pack splits
-// into reasonably sized shards).
+// least MinPackSize, typically about boundaryEvery bytes later, and is forced
+// closed at MaxPackSize (so each pack splits into reasonably sized shards).
 const (
-	MinPackSize = 2 << 20 // 2 MiB
-	MaxPackSize = 8 << 20 // 8 MiB
-)
+	MinPackSize   = 1 << 20 // 1 MiB
+	MaxPackSize   = 8 << 20 // 8 MiB
+	boundaryEvery = 2 << 20 // mean bytes between boundaries past MinPackSize
 
-// boundaryMask makes about one object id in 8 a pack boundary (once the pack
-// has MinPackSize).
-const boundaryMask = 0x07
+	// smallObject separates metadata-sized objects (snapshots, tree and file
+	// nodes, tiny files) from bulk chunks: every snapshot changes some of the
+	// former, so they are packed apart and their churn doesn't touch data packs.
+	smallObject = 64 << 10
+)
 
 // ShardRef names one shard and its index within the pack's shard set.
 type ShardRef struct {
@@ -109,18 +111,27 @@ func Reassemble(rel *Release, get func(id string) ([]byte, error)) (map[string][
 	return objects, nil
 }
 
-// groupByContent bins object ids, in sorted order, into packs whose boundaries
-// are chosen by the ids themselves: after MinPackSize, a pack closes after an
-// object whose id is a boundary. Adding or removing an object then changes only
+// groupByContent bins object ids, in sorted order (small and large objects
+// separately), into packs whose boundaries are chosen by the objects
+// themselves: after MinPackSize, a pack closes after an object whose id is a
+// boundary. Adding or removing an object then changes only
 // the pack it falls in (and, rarely, the next one), so a republish after a small
 // change re-sends a few shards instead of most of them, and shards shared by
 // several snapshots are stored once. Build is deterministic: the same objects
 // always yield the same packs and therefore the same shard ids.
 func groupByContent(objects map[string][]byte) [][]string {
-	ids := make([]string, 0, len(objects))
-	for id := range objects {
-		ids = append(ids, id)
+	var small, large []string
+	for id, data := range objects {
+		if len(data) < smallObject {
+			small = append(small, id)
+		} else {
+			large = append(large, id)
+		}
 	}
+	return append(groupIDs(large, objects), groupIDs(small, objects)...)
+}
+
+func groupIDs(ids []string, objects map[string][]byte) [][]string {
 	sort.Strings(ids)
 
 	var groups [][]string
@@ -134,7 +145,7 @@ func groupByContent(objects map[string][]byte) [][]string {
 		}
 		cur = append(cur, id)
 		size += len(data)
-		if size >= MinPackSize && isBoundary(id) {
+		if size >= MinPackSize && isBoundary(id, len(data)) {
 			groups = append(groups, cur)
 			cur, size = nil, 0
 		}
@@ -145,10 +156,13 @@ func groupByContent(objects map[string][]byte) [][]string {
 	return groups
 }
 
-// isBoundary reports whether an object id ends a pack (about 1 in 8 do).
-func isBoundary(id string) bool {
+// isBoundary reports whether an object ends a pack. The chance is proportional
+// to the object's size, so boundaries fall about every boundaryEvery bytes
+// whatever the object sizes, and depend only on the object itself.
+func isBoundary(id string, size int) bool {
 	sum := sha256.Sum256([]byte(id)) // ids are hashes already, but not all are hex
-	return sum[0]&boundaryMask == 0
+	draw := float64(binary.BigEndian.Uint64(sum[:8])) / (1 << 64)
+	return draw < float64(size)/boundaryEvery
 }
 
 // encodePack serializes a group of objects: uint32 count, then per object
