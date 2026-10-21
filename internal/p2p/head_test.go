@@ -2,12 +2,12 @@ package p2p
 
 import "testing"
 
-func TestHeadTimeStrictlyIncreases(t *testing.T) {
-	prev := headTime()
+func TestRecordTimeStrictlyIncreases(t *testing.T) {
+	prev := recordTime()
 	for i := 0; i < 10000; i++ {
-		now := headTime()
+		now := recordTime()
 		if now <= prev {
-			t.Fatalf("headTime went from %d to %d", prev, now)
+			t.Fatalf("recordTime went from %d to %d", prev, now)
 		}
 		prev = now
 	}
