@@ -380,3 +380,52 @@ func TestRetention(t *testing.T) {
 		t.Fatalf("zero policy keeps %v, want just the newest", k)
 	}
 }
+
+func TestImportOlderVersionAndReleaseCache(t *testing.T) {
+	r, priv, folder := newRepo(t)
+	v1, _, _ := r.Snapshot(priv, false)
+	objs1, _ := r.PublishSet(v1)
+	writeFile(t, filepath.Join(folder, "a.txt"), "alpha 2")
+	v2, _, _ := r.Snapshot(priv, false)
+	objs2, _ := r.PublishSet(v2)
+	get := func(m map[string][]byte) func(string) ([]byte, error) {
+		return func(id string) ([]byte, error) {
+			if d, ok := m[id]; ok {
+				return d, nil
+			}
+			return nil, os.ErrNotExist
+		}
+	}
+	out := t.TempDir()
+	l := dag.NewLoader(getterFunc(get(objs2)), getterFunc(get(objs2)), r.masterKey)
+	RestoreWith(l, v2, out)
+	adopted, err := Adopt(filepath.Join(out, "data"), r.masterKey, t.TempDir(), r.RepoID(), objs2[v2.ID], get(objs2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := adopted.Import(objs1[v1.ID], get(objs1)); err != nil {
+		t.Fatal(err)
+	}
+	snaps, _ := adopted.ListSnapshots()
+	if len(snaps) != 2 {
+		t.Fatalf("%d snapshots after importing history, want 2", len(snaps))
+	}
+	restored := t.TempDir()
+	if err := RestorePath(adopted.Loader(), v1, "a.txt", restored); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(restored, "a.txt")); string(got) != "alpha" {
+		t.Fatalf("old version a.txt = %q", got)
+	}
+
+	if err := adopted.SaveRelease(v1.ID, []byte("rel")); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := adopted.LoadRelease(v1.ID); err != nil || string(b) != "rel" {
+		t.Fatalf("LoadRelease = %q, %v", b, err)
+	}
+	adopted.Forget(v1.ID)
+	if _, err := adopted.LoadRelease(v1.ID); err == nil {
+		t.Fatal("forget should drop the cached release")
+	}
+}
