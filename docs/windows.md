@@ -57,8 +57,11 @@ later.
 
 - A CI workflow runs vet and the tests on Linux and Windows for every push.
 - The release workflow tests on Windows too and adds the two Windows binaries.
-- No Windows machine is available for live testing, so pairing, the firewall prompt and
-  the scheduled task are checked by CI and by review, not end to end.
+- **The Windows binaries are untested on real machines.** Nobody on the project runs
+  Windows, and Windows is not emulated locally. The code is cross-compiled and the unit
+  tests run on GitHub's Windows runners, but pairing, the firewall prompt, the scheduled
+  task, the password store and a real backup and restore have never been tried on
+  Windows. The README and the release notes say so.
 
 ## 4. Out of scope
 
