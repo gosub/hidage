@@ -10,6 +10,7 @@ import (
 
 	"hidage/internal/config"
 	"hidage/internal/keyring"
+	"hidage/internal/store"
 )
 
 func newInitCmd() *cobra.Command {
@@ -33,6 +34,13 @@ instead, e.g. on a new machine; then "hidage restore --friends --from <a friend'
 				return err
 			} else if wrote {
 				fmt.Printf("Wrote settings to %s\n", paths.ConfigPath)
+			}
+			storeDir, err := config.EnsureDataStore()
+			if err != nil {
+				return err
+			}
+			if err := store.CheckHardLinks(storeDir); err != nil {
+				return err
 			}
 			if keyring.Exists(paths.KeyringPath) {
 				if recover {
@@ -70,10 +78,6 @@ instead, e.g. on a new machine; then "hidage restore --friends --from <a friend'
 					return err
 				}
 				fmt.Printf("Initialized hidage at %s\n", paths.Dir)
-			}
-			storeDir, err := config.EnsureDataStore()
-			if err != nil {
-				return err
 			}
 			fmt.Printf("Public key: %x\n", kr.Identity().Public)
 			fmt.Printf("Data store: %s\n", storeDir)

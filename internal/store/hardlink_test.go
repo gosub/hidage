@@ -110,3 +110,14 @@ func TestHardlinkNoTempLeak(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckHardLinks(t *testing.T) {
+	root := t.TempDir()
+	if err := CheckHardLinks(root); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(root)
+	if len(entries) != 0 {
+		t.Fatalf("check left %d file(s) behind", len(entries))
+	}
+}

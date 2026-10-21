@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"hidage/internal/fsx"
 )
@@ -29,6 +30,9 @@ type HardlinkStore struct {
 func NewHardlinkStore(root, namespace string) (*HardlinkStore, error) {
 	if err := fsx.MkdirPrivate(root); err != nil {
 		return nil, fmt.Errorf("create %s: %w", root, err)
+	}
+	if err := CheckHardLinks(root); err != nil {
+		return nil, err
 	}
 	s := &HardlinkStore{
 		pool: filepath.Join(root, "pool"),
@@ -149,6 +153,40 @@ func writeAtomic(path string, data []byte) error {
 		os.Remove(tmp)
 		return err
 	}
+	return nil
+}
+
+// linkChecked remembers the store roots whose filesystem passed CheckHardLinks.
+var linkChecked sync.Map
+
+// ErrNoHardLinks means the data store is on a filesystem without hard links,
+// such as FAT32 or exFAT, which the store's reference counting needs.
+var ErrNoHardLinks = errors.New("filesystem does not support hard links")
+
+// CheckHardLinks verifies, once per process and root, that files under root
+// can be hard-linked and that the link count is reported.
+func CheckHardLinks(root string) error {
+	if _, ok := linkChecked.Load(root); ok {
+		return nil
+	}
+	a := filepath.Join(root, ".linkcheck-"+randHex())
+	b := a + "-2"
+	defer os.Remove(a)
+	defer os.Remove(b)
+	if err := os.WriteFile(a, nil, 0o600); err != nil {
+		return fmt.Errorf("data store %s: %w", root, err)
+	}
+	fail := func(cause error) error {
+		return fmt.Errorf("data store %s: %w (%v); put it on NTFS, APFS, ext4 or another "+
+			"filesystem with hard links, using `store` in config.toml or HIDAGE_STORE", root, ErrNoHardLinks, cause)
+	}
+	if err := os.Link(a, b); err != nil {
+		return fail(err)
+	}
+	if n, err := linkCount(a); err != nil || n != 2 {
+		return fail(fmt.Errorf("link count %d, %v", n, err))
+	}
+	linkChecked.Store(root, true)
 	return nil
 }
 
