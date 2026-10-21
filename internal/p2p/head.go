@@ -12,6 +12,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
@@ -46,9 +47,27 @@ func HeadKey(pub ed25519.PublicKey) string {
 
 // SignHead returns a signed head record naming manifestID as the owner's latest.
 func SignHead(id identity.Identity, manifestID string) ([]byte, error) {
-	rec := headRecord{SnapshotID: manifestID, CreatedAt: time.Now().UnixNano()}
+	rec := headRecord{SnapshotID: manifestID, CreatedAt: headTime()}
 	rec.Sig = ed25519.Sign(id.Private, headPayload(manifestID, rec.CreatedAt))
 	return json.Marshal(rec)
+}
+
+// lastHeadTime is the timestamp of the last head signed by this process.
+var lastHeadTime atomic.Int64
+
+// headTime returns the current time in unix nanoseconds, made strictly greater
+// than the last head's: the clock can tick coarsely (about every millisecond on
+// Windows), and two heads with one timestamp would leave "newest wins" a tie.
+func headTime() int64 {
+	for {
+		last, now := lastHeadTime.Load(), time.Now().UnixNano()
+		if now <= last {
+			now = last + 1
+		}
+		if lastHeadTime.CompareAndSwap(last, now) {
+			return now
+		}
+	}
 }
 
 func pubFromKey(key string) (ed25519.PublicKey, error) {
