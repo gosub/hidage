@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"syscall"
 )
 
 // HardlinkStore is a content-addressed store that deduplicates blobs across
@@ -17,8 +16,8 @@ import (
 // namespace (refs/<namespace>/). The filesystem's link count acts as a
 // cross-repository reference count, so a repository can prune its own links
 // safely: a blob's disk space is reclaimed only when the last repository
-// referencing it unlinks. The pool and the namespaces must live on one Unix
-// filesystem (hard links can't span filesystems).
+// referencing it unlinks. The pool and the namespaces must live on one
+// filesystem that supports hard links (they can't span filesystems).
 type HardlinkStore struct {
 	pool string // <root>/pool
 	refs string // <root>/refs/<namespace>
@@ -152,17 +151,4 @@ func randHex() string {
 	b := make([]byte, 8)
 	rand.Read(b)
 	return hex.EncodeToString(b)
-}
-
-// linkCount returns the number of hard links to the file at path.
-func linkCount(path string) (uint64, error) {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return 0, err
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, fmt.Errorf("hardlink store requires a Unix filesystem")
-	}
-	return uint64(st.Nlink), nil
 }
