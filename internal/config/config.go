@@ -93,9 +93,10 @@ type Settings struct {
 	Reachability string `toml:"reachability"`
 	// PassphraseCommand, if set, is run (via sh -c) to obtain the keyring
 	// passphrase on stdout, e.g. for an unattended daemon.
-	PassphraseCommand string  `toml:"passphrase_command"`
-	Hosting           Hosting `toml:"hosting"`
-	Backup            Backup  `toml:"backup"`
+	PassphraseCommand string    `toml:"passphrase_command"`
+	Hosting           Hosting   `toml:"hosting"`
+	Backup            Backup    `toml:"backup"`
+	Retention         Retention `toml:"retention"`
 }
 
 // Hosting configures what this node stores for friends.
@@ -134,6 +135,14 @@ func (b Backup) FolderPaths() []string {
 	return out
 }
 
+// Retention says which versions of a folder to keep, locally (applied by the
+// daemon and `forget --retention`) and on friends (published with each backup).
+type Retention struct {
+	KeepLast   int `toml:"keep_last"`
+	KeepDaily  int `toml:"keep_daily"`
+	KeepWeekly int `toml:"keep_weekly"`
+}
+
 // Defaults returns the settings used when config.toml is absent.
 func Defaults() Settings {
 	name, _ := os.Hostname()
@@ -145,6 +154,7 @@ func Defaults() Settings {
 		},
 		Reachability: "auto",
 		Hosting:      Hosting{DefaultGive: 100 << 30, LeaseDays: 90, TrashDays: 30},
+		Retention:    Retention{KeepLast: 3, KeepDaily: 7, KeepWeekly: 4},
 		Backup: Backup{
 			Redundancy: 2.0, MinFriends: 1, Folders: []string{},
 			Every: Interval(time.Hour), RenewEvery: Interval(24 * time.Hour), AuditEvery: Interval(24 * time.Hour),
@@ -235,7 +245,8 @@ func WriteTemplate(p Paths) (bool, error) {
 	}
 	body := fmt.Sprintf(template, d.Name, DataStoreDir(), strings.Join(listen, ", "), d.Reachability,
 		FormatSize(int64(d.Hosting.DefaultGive)), d.Hosting.LeaseDays, d.Hosting.TrashDays,
-		d.Backup.Redundancy, d.Backup.MinFriends, d.Backup.Every, d.Backup.RenewEvery, d.Backup.AuditEvery)
+		d.Backup.Redundancy, d.Backup.MinFriends, d.Backup.Every, d.Backup.RenewEvery, d.Backup.AuditEvery,
+		d.Retention.KeepLast, d.Retention.KeepDaily, d.Retention.KeepWeekly)
 	if err := os.WriteFile(p.ConfigPath, []byte(body), 0o600); err != nil {
 		return false, fmt.Errorf("write %s: %w", p.ConfigPath, err)
 	}
@@ -286,4 +297,12 @@ every = %q
 renew_every = %q
 # How often to check that friends still hold your data.
 audit_every = %q
+
+[retention]
+# Versions of each folder to keep, here and with your friends: the newest
+# keep_last, plus the newest of each of the last keep_daily days and keep_weekly
+# weeks. The daemon forgets the rest; "hidage forget --retention" does it now.
+keep_last = %d
+keep_daily = %d
+keep_weekly = %d
 `

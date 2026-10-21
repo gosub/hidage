@@ -66,7 +66,7 @@ func TestTemplateRoundTrip(t *testing.T) {
 		got.Hosting != want.Hosting || got.Backup.Redundancy != want.Backup.Redundancy ||
 		got.Backup.MinFriends != want.Backup.MinFriends || len(got.Backup.Folders) != 0 ||
 		got.Backup.Every != want.Backup.Every || got.Backup.RenewEvery != want.Backup.RenewEvery ||
-		got.Backup.AuditEvery != want.Backup.AuditEvery {
+		got.Backup.AuditEvery != want.Backup.AuditEvery || got.Retention != want.Retention {
 		t.Fatalf("template decodes to %+v, want %+v", got, want)
 	}
 }
