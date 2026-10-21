@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"hidage/internal/fsx"
 )
 
 // HardlinkStore is a content-addressed store that deduplicates blobs across
@@ -93,7 +95,7 @@ func (s *HardlinkStore) Has(id string) (bool, error) {
 // blob anymore (only the pool's own link remains), removes the pooled copy too.
 func (s *HardlinkStore) Delete(id string) error {
 	rp := s.refPath(id)
-	if err := os.Remove(rp); err != nil {
+	if err := fsx.Remove(rp); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return ErrNotFound
 		}
@@ -108,7 +110,7 @@ func (s *HardlinkStore) Delete(id string) error {
 		return err
 	}
 	if n <= 1 { // only the pool link remains; nothing references it
-		if err := os.Remove(pp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := fsx.Remove(pp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	}
@@ -140,7 +142,7 @@ func writeAtomic(path string, data []byte) error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := fsx.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err
 	}

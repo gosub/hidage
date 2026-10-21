@@ -23,6 +23,8 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
+
+	"hidage/internal/fsx"
 )
 
 // Friend is one entry in the friend list.
@@ -365,7 +367,7 @@ func (b *Book) saveLocked() error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, b.path); err != nil {
+	if err := fsx.Rename(tmp, b.path); err != nil {
 		return err
 	}
 	if info, err := os.Stat(b.path); err == nil {

@@ -24,6 +24,8 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	"hidage/internal/fsx"
 )
 
 // ErrNotFound is returned when an owner has no such object.
@@ -201,7 +203,7 @@ func (s *Session) Put(id string, data []byte) error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, p)
+	return fsx.Rename(tmp, p)
 }
 
 // Commit makes ids the set's content (renewing its lease), brings listed objects
@@ -229,7 +231,7 @@ func (s *Session) Commit(ids []string) (int64, error) {
 	if err := os.WriteFile(p+".tmp", data, 0o600); err != nil {
 		return 0, err
 	}
-	if err := os.Rename(p+".tmp", p); err != nil {
+	if err := fsx.Rename(p+".tmp", p); err != nil {
 		return 0, err
 	}
 	if _, err := s.h.collect(s.owner); err != nil {
@@ -259,7 +261,7 @@ func (h *Host) Reap(lease, trashAge time.Duration) (ReapStats, error) {
 			p := h.dir(owner, "sets", e.Name())
 			sf, err := readSet(p)
 			if err == nil && now.Sub(sf.UpdatedAt) > lease {
-				if os.Remove(p) == nil {
+				if fsx.Remove(p) == nil {
 					st.ExpiredSets++
 				}
 			}
@@ -275,7 +277,7 @@ func (h *Host) Reap(lease, trashAge time.Duration) (ReapStats, error) {
 				return nil
 			}
 			if info, err := d.Info(); err == nil && now.Sub(info.ModTime()) > trashAge {
-				if os.Remove(p) == nil {
+				if fsx.Remove(p) == nil {
 					st.DeletedTrash++
 					st.FreedBytes += info.Size()
 				}
@@ -337,7 +339,7 @@ func (h *Host) move(owner, id, from, to string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return err
 	}
-	if err := os.Rename(h.objPath(owner, from, id), dst); err != nil {
+	if err := fsx.Rename(h.objPath(owner, from, id), dst); err != nil {
 		return err
 	}
 	now := time.Now()
