@@ -2,6 +2,7 @@ package repo
 
 import (
 	"crypto/ed25519"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -465,5 +466,25 @@ func TestUnreadableFileSkipped(t *testing.T) {
 	}
 	if got := r.LastUnreadable(); len(got) != 0 {
 		t.Fatalf("LastUnreadable after fixing = %+v", got)
+	}
+}
+
+func TestSnapshotsOrderedWithinOneClockTick(t *testing.T) {
+	r, priv, folder := newRepo(t)
+	var last *Snapshot
+	for i := 0; i < 20; i++ {
+		writeFile(t, filepath.Join(folder, "a.txt"), fmt.Sprintf("version %d", i))
+		snap, _, err := r.Snapshot(priv, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if last != nil && !snap.CreatedAt.After(last.CreatedAt) {
+			t.Fatalf("snapshot %d at %v, not after %v", i, snap.CreatedAt, last.CreatedAt)
+		}
+		last = snap
+	}
+	snaps, _ := r.ListSnapshots()
+	if snaps[len(snaps)-1].ID != last.ID {
+		t.Fatal("the newest snapshot does not sort last")
 	}
 }

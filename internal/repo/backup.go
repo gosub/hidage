@@ -88,9 +88,15 @@ func (r *Repo) snapshot(priv ed25519.PrivateKey, replace, skipUnchanged bool) (*
 		}
 	}
 
+	// Snapshots are ordered by time, so each must be later than the previous
+	// one even when the clock ticks coarsely (about every millisecond on Windows).
+	created := time.Now().UTC()
+	if prev != nil && !created.After(prev.CreatedAt) {
+		created = prev.CreatedAt.Add(time.Nanosecond)
+	}
 	snap := &Snapshot{
 		Version:   1,
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: created,
 		Parent:    parentID,
 		Source:    filepath.Base(r.Folder),
 		Root:      root,

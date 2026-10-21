@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -55,7 +54,7 @@ func (r *AddrRecord) Verify() error {
 
 // SignedAddrRecord returns a fresh signed record of this node's addresses.
 func (n *Node) SignedAddrRecord() *AddrRecord {
-	r := &AddrRecord{PubKey: hex.EncodeToString(n.id.Public), Addrs: n.ListenAddrs(), Seq: time.Now().UnixNano()}
+	r := &AddrRecord{PubKey: hex.EncodeToString(n.id.Public), Addrs: n.ListenAddrs(), Seq: recordTime()}
 	r.Sig = ed25519.Sign(n.id.Private, addrPayload(r))
 	return r
 }
