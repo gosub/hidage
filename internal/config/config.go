@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +50,9 @@ type Paths struct {
 // Resolve computes the config paths without creating anything on disk.
 func Resolve() (Paths, error) {
 	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" && runtime.GOOS == "windows" {
+		base = os.Getenv("APPDATA")
+	}
 	if base == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -196,7 +200,7 @@ func reset() { loadOnce = sync.Once{} }
 
 // DataStoreDir returns the node-wide chunk store path: $HIDAGE_STORE if set,
 // else the config file's store, else the legacy /opt location if it exists,
-// else $XDG_DATA_HOME/hidage/store.
+// else $XDG_DATA_HOME/hidage/store (%LocalAppData%\hidage\store on Windows).
 func DataStoreDir() string {
 	if v := os.Getenv(DataStoreEnv); v != "" {
 		return v
@@ -204,14 +208,19 @@ func DataStoreDir() string {
 	if s, _ := Load(); s.Store != "" {
 		return expandHome(s.Store)
 	}
-	if _, err := os.Stat(LegacyDataStore); err == nil {
-		return LegacyDataStore
+	if runtime.GOOS != "windows" {
+		if _, err := os.Stat(LegacyDataStore); err == nil {
+			return LegacyDataStore
+		}
 	}
 	return defaultDataStore()
 }
 
 func defaultDataStore() string {
 	base := os.Getenv("XDG_DATA_HOME")
+	if base == "" && runtime.GOOS == "windows" {
+		base = os.Getenv("LOCALAPPDATA")
+	}
 	if base == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -222,9 +231,10 @@ func defaultDataStore() string {
 	return filepath.Join(base, AppName, "store")
 }
 
-// expandHome expands a leading "~/" to the user's home directory.
+// expandHome expands a leading "~/" (or `~\` on Windows) to the user's home
+// directory.
 func expandHome(p string) string {
-	if len(p) >= 2 && p[:2] == "~/" {
+	if len(p) >= 2 && p[0] == '~' && (p[1] == '/' || p[1] == filepath.Separator) {
 		if home, err := os.UserHomeDir(); err == nil {
 			return filepath.Join(home, p[2:])
 		}
