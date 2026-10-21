@@ -176,7 +176,10 @@ func (r *Repo) buildTree(b *dag.Builder, dir string, entries []os.DirEntry, w *w
 			continue // never back up our own metadata
 		}
 		full := filepath.Join(dir, de.Name())
-		fi, err := de.Info()
+		// Lstat, not de.Info(): on Windows the directory listing's times come
+		// from the parent's index, which NTFS updates lazily, so an unchanged
+		// folder could look changed. On Unix both are an lstat.
+		fi, err := os.Lstat(full)
 		if err != nil {
 			w.unread(full, err)
 			continue
@@ -184,7 +187,7 @@ func (r *Repo) buildTree(b *dag.Builder, dir string, entries []os.DirEntry, w *w
 		switch {
 		case onlineOnly(fi):
 			w.unreadable = append(w.unreadable, Skip{Path: full, Reason: "online-only, not downloaded"})
-		case de.IsDir():
+		case fi.IsDir():
 			sub, err := os.ReadDir(full)
 			if err != nil {
 				w.unread(full, err)
