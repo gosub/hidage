@@ -299,6 +299,17 @@ person, and the shards spread over both friends.
 - Backing up from several devices under one identity.
 - Volume Shadow Copy on Windows, and signed Windows binaries.
 
+## The name
+
+"hidage" started as a blend of *hidden* and *storage*. Only later did I learn it is
+also an old English word. In Anglo-Saxon England a *hide* was the amount of land
+needed to support one household, and a territory's *hidage* was its size counted in
+hides. The *Tribal Hidage*, a list compiled between the 7th and 9th centuries, records
+the peoples of the time by how many hides each one held.
+
+It fit better than planned: a small tribe of friends, each setting aside just enough
+disk to keep the others' backups alive.
+
 ## Development
 
 ```sh
