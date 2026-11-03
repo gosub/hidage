@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.svg" alt="hidage logo: a log cabin in the woods inside an oval bookplate" width="220"></p>
+
 # hidage: encrypted backup with your friends
 
 `hidage` backs up your folders to your friends' computers instead of a cloud service.
@@ -296,6 +298,17 @@ person, and the shards spread over both friends.
 - Getting data back from a friend's trash after a bad backup replaced the good one.
 - Backing up from several devices under one identity.
 - Volume Shadow Copy on Windows, and signed Windows binaries.
+
+## The name
+
+"hidage" started as a blend of *hidden* and *storage*. Only later did I learn it is
+also an old English word. In Anglo-Saxon England a *hide* was the amount of land
+needed to support one household, and a territory's *hidage* was its size counted in
+hides. The *Tribal Hidage*, a list compiled between the 7th and 9th centuries, records
+the peoples of the time by how many hides each one held.
+
+It fit better than planned: a small tribe of friends, each setting aside just enough
+disk to keep the others' backups alive.
 
 ## Development
 
