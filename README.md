@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.svg" alt="hidage logo: a log cabin in the woods inside an oval bookplate" width="220"></p>
+
 # hidage: encrypted backup with your friends
 
 `hidage` backs up your folders to your friends' computers instead of a cloud service.
